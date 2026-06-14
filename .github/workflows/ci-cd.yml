@@ -1,0 +1,61 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [ published ]
+
+env:
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  SOLUTION_PATH: Moongazing.OrionStream.sln
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dotnet-version: ['8.0.x', '9.0.x', '10.0.x']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup .NET ${{ matrix.dotnet-version }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet-version }}
+      - name: Restore
+        run: dotnet restore ${{ env.SOLUTION_PATH }}
+      - name: Build
+        run: dotnet build ${{ env.SOLUTION_PATH }} --no-restore --configuration Release
+      - name: Test
+        run: dotnet test ${{ env.SOLUTION_PATH }} --no-restore --configuration Release --verbosity normal
+
+  publish:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore
+        run: dotnet restore ${{ env.SOLUTION_PATH }}
+      - name: Build
+        run: dotnet build ${{ env.SOLUTION_PATH }} --no-restore --configuration Release
+      - name: Pack
+        run: dotnet pack src/Moongazing.OrionStream/Moongazing.OrionStream.csproj --no-build --configuration Release -o ./nupkgs
+      - name: Push to NuGet.org
+        run: dotnet nuget push "./nupkgs/*.nupkg" --api-key "${{ secrets.NUGET }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+      - name: Push to GitHub Packages
+        run: |
+          dotnet nuget add source --username ${{ github.repository_owner }} --password ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+          dotnet nuget push "./nupkgs/*.nupkg" --source github --skip-duplicate
