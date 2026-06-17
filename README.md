@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="OrionStream" width="150" />
+</p>
+
 # OrionStream
 
 [![CI/CD](https://github.com/tunahanaliozturk/OrionStream/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/tunahanaliozturk/OrionStream/actions/workflows/ci-cd.yml)
