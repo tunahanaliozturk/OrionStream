@@ -13,21 +13,62 @@ subscribed to that topic receives it, over a plain `text/event-stream` response 
 
 Part of the **Orion** family. Usable entirely on its own.
 
+---
+
 ## Why
 
 SSE is the simplest way to push server events to a browser: one long-lived HTTP response, a tiny
-wire format, automatic client reconnect. The fiddly parts are the wire format (multi-line data,
-the field order, heartbeats so proxies do not close an idle stream) and fan-out without letting a
-slow client stall the others. OrionStream handles both: a hub with a bounded buffer per subscriber
+wire format, automatic client reconnect. The fiddly parts are the wire format (multi-line data, the
+field order, heartbeats so proxies do not close an idle stream) and fan-out without letting a slow
+client stall the others. OrionStream handles both: a topic hub with a bounded buffer per subscriber
 and a spec-correct writer.
+
+The library has three independent pieces. The hub (`ISseHub`) and the formatter (`SseFormatter`)
+have no dependency on HTTP, so both are unit-tested directly. The writer extension
+(`WriteStreamAsync`) is the only piece that touches `HttpResponse`, and it adapts a subscription to
+the response body.
+
+---
+
+## Features
+
+- **Topic-based broadcast hub.** Publish once to a topic; every current subscriber receives the
+  event. Topics are created on first subscribe and removed when their last subscriber leaves, so an
+  idle topic costs nothing.
+- **Bounded per-subscriber buffering.** Each subscriber gets its own bounded channel in
+  `DropOldest` mode. A publish never blocks: a slow subscriber drops its own oldest event to admit
+  the newest, and a slow client degrades only its own stream.
+- **Spec-correct wire format.** `SseFormatter` renders the `text/event-stream` fields in canonical
+  order (`id`, `event`, `retry`, `data`), splits multi-line payloads across multiple `data:` lines,
+  and strips stray newlines from single-line fields.
+- **Heartbeats.** The writer sends an SSE comment line on an idle stream so proxies and load
+  balancers keep the connection open.
+- **Last-Event-ID resume.** Set `ServerSentEvent.Id` and the browser echoes it as `Last-Event-ID`
+  on reconnect, which the server can read to resume.
+- **Built-in metrics.** A `System.Diagnostics.Metrics` meter named `Moongazing.OrionStream` exposes
+  published and dropped counters and a current-subscribers gauge.
+- **Multi-targeted.** `net8.0`, `net9.0`, `net10.0`, nullable enabled, warnings as errors.
+
+See [docs/FEATURES.md](docs/FEATURES.md) for the full surface and [docs/ROADMAP.md](docs/ROADMAP.md)
+for where this is going.
+
+---
 
 ## Install
 
-```
+```bash
 dotnet add package OrionStream
 ```
 
+The package id is `OrionStream`; the root namespace is `Moongazing.OrionStream`. It carries a
+`FrameworkReference` to `Microsoft.AspNetCore.App`, so add it to a project that targets the ASP.NET
+Core shared framework.
+
+---
+
 ## Quick start
+
+Register the hub, its options, and diagnostics (all singletons):
 
 ```csharp
 builder.Services.AddOrionStream(o =>
@@ -37,7 +78,7 @@ builder.Services.AddOrionStream(o =>
 });
 ```
 
-Endpoint that streams a topic to the client:
+Map an endpoint that streams a topic to the client:
 
 ```csharp
 app.MapGet("/events/orders", async (HttpContext ctx, ISseHub hub, StreamOptions options) =>
@@ -47,7 +88,7 @@ app.MapGet("/events/orders", async (HttpContext ctx, ISseHub hub, StreamOptions 
 });
 ```
 
-Publish from anywhere:
+Publish from anywhere that has the hub:
 
 ```csharp
 hub.Publish("orders", new ServerSentEvent
@@ -58,37 +99,218 @@ hub.Publish("orders", new ServerSentEvent
 });
 ```
 
-The browser side is just:
+The browser side needs no client library:
 
 ```js
 const es = new EventSource("/events/orders");
 es.addEventListener("order.created", e => console.log(JSON.parse(e.data)));
 ```
 
-## Back-pressure
+---
 
-Each subscriber has its own bounded buffer (`SubscriberCapacity`). A publish never blocks: if a
-subscriber has fallen behind and its buffer is full, the oldest buffered event is dropped to admit
-the newest, and the drop is counted in telemetry. A slow client degrades only its own stream.
+## Usage
 
-## Heartbeats and reconnect
+### Topics and the hub
 
-When a stream is idle for `HeartbeatInterval`, the writer sends an SSE comment line so proxies keep
-the connection open. Set `ServerSentEvent.Id` and the browser will send it back as `Last-Event-ID`
-on reconnect, which you can read to resume.
+`ISseHub` is the entire producer/consumer surface:
+
+```csharp
+public interface ISseHub
+{
+    StreamSubscription Subscribe(string topic);
+    int Publish(string topic, ServerSentEvent evt);
+    int SubscriberCount(string topic);
+}
+```
+
+- `Subscribe(topic)` returns a `StreamSubscription`. Read events off `subscription.Reader` (a
+  `ChannelReader<ServerSentEvent>`) and dispose the subscription to unsubscribe. Disposal is
+  idempotent.
+- `Publish(topic, evt)` delivers to every current subscriber of the topic and returns the number of
+  subscribers it reached. Publishing to a topic with no subscribers returns `0` and does nothing
+  else.
+- `SubscriberCount(topic)` is the current count for a topic, handy for diagnostics or for skipping
+  serialization when nobody is listening.
+
+Topic matching is ordinal (case-sensitive). A topic is tracked lazily on first subscribe and removed
+once its last subscriber disposes, so the topic map does not grow with idle topics.
+
+### Back-pressure and DropOldest
+
+Each subscriber gets a bounded channel sized to `SubscriberCapacity`, created with
+`BoundedChannelFullMode.DropOldest`. The consequence is that `Publish` is non-blocking by
+construction: a slow reader can never stall the producer or the other subscribers. When a
+subscriber's buffer is already full at publish time, its oldest buffered event is evicted to make
+room for the newest, and that eviction is counted in telemetry (`orionstream.dropped`).
+
+```csharp
+// With SubscriberCapacity = 2 and a reader that has not drained:
+hub.Publish("orders", new ServerSentEvent { Data = "1" });
+hub.Publish("orders", new ServerSentEvent { Data = "2" });
+hub.Publish("orders", new ServerSentEvent { Data = "3" }); // evicts "1"; reader now sees "2", "3"
+```
+
+This is a deliberate trade-off: OrionStream favors keeping every stream live and current over
+guaranteeing delivery of every event to a client that cannot keep up. Pick `SubscriberCapacity`
+large enough to ride out normal bursts; use `ServerSentEvent.Id` plus a server-side replay source if
+a client must recover events it missed.
+
+### The formatter
+
+`SseFormatter` is a pure, allocation-light renderer you can use independently of the hub or the HTTP
+writer, for example in tests:
+
+```csharp
+var wire = SseFormatter.Format(new ServerSentEvent
+{
+    Id = "42",
+    EventName = "tick",
+    RetryMilliseconds = 3000,
+    Data = "payload",
+});
+// "id: 42\nevent: tick\nretry: 3000\ndata: payload\n\n"
+```
+
+It follows the HTML SSE spec: fields render in canonical order, only the fields you set are emitted,
+multi-line `Data` becomes multiple `data:` lines (`\r\n`, `\r`, and `\n` are all normalized), and
+stray newlines in `Id`/`EventName` are stripped so they cannot break the framing. A heartbeat is the
+constant `SseFormatter.Heartbeat` (`": heartbeat\n\n"`), a comment line that carries no event.
+
+### Subscriber lifecycle and the writer
+
+`WriteStreamAsync` is the bridge from a subscription to an `HttpResponse`. It sets the SSE response
+headers (`Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`),
+then loops: it drains the subscription's reader to the response body, and whenever the stream is idle
+for `heartbeatInterval` it writes a heartbeat comment so intermediaries keep the connection open. It
+returns when the client disconnects (the cancellation token trips, typically `ctx.RequestAborted`)
+or when the subscription completes. A client disconnect is the expected exit and is handled silently.
+
+The canonical pattern is to scope the subscription to the request with `using`, so that when
+`WriteStreamAsync` returns the subscription is disposed and the subscriber is removed from the hub:
+
+```csharp
+app.MapGet("/events/{topic}", async (string topic, HttpContext ctx, ISseHub hub, StreamOptions options) =>
+{
+    using var subscription = hub.Subscribe(topic);
+    await ctx.Response.WriteStreamAsync(subscription, options.HeartbeatInterval, ctx.RequestAborted);
+});
+```
+
+---
+
+## Configuration
+
+`AddOrionStream` takes an optional `Action<StreamOptions>`. Options are validated eagerly at
+registration time, so an invalid value throws from `AddOrionStream`, not later at first use.
+
+```csharp
+public sealed class StreamOptions
+{
+    public int SubscriberCapacity { get; set; } = 256;
+    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(15);
+}
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `SubscriberCapacity` | `256` | Bounded buffer size per subscriber. Must be at least `1`. When a subscriber falls this far behind, its oldest buffered event is dropped to admit the newest. |
+| `HeartbeatInterval` | `15s` | How long a stream may be idle before the writer sends a heartbeat comment. Must be positive. |
+
+`AddOrionStream` registers three singletons via `TryAdd`, so you can override any of them before or
+after the call: `StreamOptions`, `StreamDiagnostics`, and `ISseHub` (implemented by `SseHub`).
+
+---
 
 ## Telemetry
 
-Subscribe to the `Moongazing.OrionStream` meter: `orionstream.published`, `orionstream.dropped`,
-and an `orionstream.subscribers` gauge of currently connected subscribers.
+`StreamDiagnostics` owns a `System.Diagnostics.Metrics.Meter` named `Moongazing.OrionStream`
+(also exposed as `StreamDiagnostics.MeterName`). Subscribe to it from OpenTelemetry or any
+`MeterListener`:
+
+| Instrument | Kind | Unit | Meaning |
+| --- | --- | --- | --- |
+| `orionstream.published` | Counter | `{event}` | Events published to the hub, counted once per publish (not per subscriber). |
+| `orionstream.dropped` | Counter | `{event}` | Events dropped because a subscriber buffer was full at publish time. |
+| `orionstream.subscribers` | Observable gauge | `{subscriber}` | Currently connected subscribers across all topics. |
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(m => m.AddMeter(StreamDiagnostics.MeterName));
+```
+
+A steadily climbing `orionstream.dropped` is the signal that subscribers cannot keep up: raise
+`SubscriberCapacity`, reduce publish volume, or shrink per-event payloads.
+
+---
+
+## Testing
+
+The hub and the formatter are plain in-memory types with no HTTP dependency, so they test directly.
+The writer is verified against a real `DefaultHttpContext` with a capturing response body.
+
+```csharp
+using var diagnostics = new StreamDiagnostics();
+var hub = new SseHub(new StreamOptions { SubscriberCapacity = 2 }, diagnostics);
+using var subscription = hub.Subscribe("orders");
+
+var delivered = hub.Publish("orders", new ServerSentEvent { Data = "hello" });
+
+Assert.Equal(1, delivered);
+Assert.True(subscription.Reader.TryRead(out var evt));
+Assert.Equal("hello", evt!.Data);
+```
+
+`SseFormatter.Format` is a pure function over a `ServerSentEvent`, which makes wire-format assertions
+exact and trivial:
+
+```csharp
+Assert.Equal("data: hello\n\n", SseFormatter.Format(new ServerSentEvent { Data = "hello" }));
+```
+
+---
+
+## Benchmarks
+
+In-memory micro-benchmarks for the formatter and the hub (publish fan-out, throughput with and
+without the DropOldest path, and subscribe/dispose churn) live in
+`benchmarks/Moongazing.OrionStream.Benchmarks` and reference the library directly. See
+[benchmarks.md](benchmarks.md) for what each one measures. No result numbers are committed because
+they are machine-specific; run the suite locally:
+
+```bash
+dotnet run -c Release --project benchmarks/Moongazing.OrionStream.Benchmarks -- --filter "*"
+```
+
+---
 
 ## Design
 
 - Multi-targets `net8.0`, `net9.0`, `net10.0`.
-- `TreatWarningsAsErrors`, latest analyzers, nullable enabled.
+- `TreatWarningsAsErrors`, latest analyzers, nullable enabled, XML docs generated.
 - The hub and the SSE formatter are independent of HTTP, so both are unit-tested directly; the
   writer extension adapts them to an `HttpResponse`.
 
+---
+
+## Versioning
+
+OrionStream is at **0.1.0**. While it is pre-1.0 the public API may still change between minor
+versions; once it reaches 1.0 it will follow [SemVer 2.0.0](https://semver.org/). See
+[CHANGELOG.md](CHANGELOG.md) for the per-release history.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md) before opening one.
+
 ## License
 
-MIT.
+MIT. See [LICENSE](LICENSE).
+
+## Author
+
+**Tunahan Ali Ozturk** - [GitHub](https://github.com/tunahanaliozturk)
+</content>
+</invoke>
