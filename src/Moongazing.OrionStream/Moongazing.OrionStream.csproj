@@ -4,13 +4,11 @@
     <RootNamespace>Moongazing.OrionStream</RootNamespace>
     <Description>Server-Sent Events for ASP.NET Core: a topic-based broadcast hub with bounded per-subscriber buffering, a spec-correct SSE wire-format writer, and heartbeats to keep connections alive.</Description>
     <PackageTags>sse;server-sent-events;streaming;realtime;aspnetcore;orion</PackageTags>
-    <PackageReadmeFile>docs/README.md</PackageReadmeFile>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="docs/README.md" Pack="true" PackagePath="docs/README.md" />
     <InternalsVisibleTo Include="Moongazing.OrionStream.Tests" />
   </ItemGroup>
 </Project>
