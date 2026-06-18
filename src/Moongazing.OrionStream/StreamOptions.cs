@@ -18,6 +18,15 @@ public sealed class StreamOptions
     /// </summary>
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(15);
 
+    /// <summary>
+    /// How many of the most recent events per topic are retained for replay when a client resumes
+    /// with a <c>Last-Event-ID</c>. The hub stamps each published event with a topic-monotonic id
+    /// and keeps the newest <see cref="ReplayBufferCapacity"/> events; a resume with a known id
+    /// replays only the events after it, while an unknown or evicted id falls back to a from-now
+    /// stream. Set to 0 to disable replay entirely. Default 256.
+    /// </summary>
+    public int ReplayBufferCapacity { get; set; } = 256;
+
     internal void Validate()
     {
         if (SubscriberCapacity < 1)
@@ -29,6 +38,11 @@ public sealed class StreamOptions
         {
             throw new ArgumentOutOfRangeException(nameof(HeartbeatInterval), HeartbeatInterval,
                 "HeartbeatInterval must be positive.");
+        }
+        if (ReplayBufferCapacity < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ReplayBufferCapacity), ReplayBufferCapacity,
+                "ReplayBufferCapacity must be zero or greater.");
         }
     }
 }

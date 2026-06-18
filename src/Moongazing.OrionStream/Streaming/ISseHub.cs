@@ -15,6 +15,20 @@ public interface ISseHub
     StreamSubscription Subscribe(string topic);
 
     /// <summary>
+    /// Subscribe to a topic, optionally resuming after a client-supplied <c>Last-Event-ID</c>. When
+    /// <paramref name="lastEventId"/> identifies an event still held in the topic replay buffer, the
+    /// events published after it are replayed into the subscription before live events flow, so the
+    /// client misses nothing across a reconnect. When <paramref name="lastEventId"/> is null, empty,
+    /// unparsable, or older than the buffer still holds (evicted or never seen), the subscription
+    /// starts from now with no replay. Replay is bounded by
+    /// <see cref="StreamOptions.ReplayBufferCapacity"/>; replayed events count against the
+    /// subscriber buffer like any other event.
+    /// </summary>
+    /// <param name="topic">The topic to subscribe to.</param>
+    /// <param name="lastEventId">The client's last seen event id, or null to start from now.</param>
+    StreamSubscription Subscribe(string topic, string? lastEventId);
+
+    /// <summary>
     /// Publish an event to every current subscriber of a topic. Never blocks on a slow subscriber:
     /// when a subscriber buffer is full the oldest event in it is dropped to admit the newest.
     /// </summary>

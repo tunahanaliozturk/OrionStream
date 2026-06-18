@@ -15,6 +15,24 @@ public sealed class StreamOptionsTests
 
         Assert.Equal(256, options.SubscriberCapacity);
         Assert.Equal(TimeSpan.FromSeconds(15), options.HeartbeatInterval);
+        Assert.Equal(256, options.ReplayBufferCapacity);
+    }
+
+    [Fact]
+    public void A_zero_replay_buffer_capacity_is_valid()
+    {
+        var options = new StreamOptions { ReplayBufferCapacity = 0 };
+
+        options.Validate();
+    }
+
+    [Fact]
+    public void A_negative_replay_buffer_capacity_is_rejected()
+    {
+        var options = new StreamOptions { ReplayBufferCapacity = -1 };
+
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(options.Validate);
+        Assert.Equal(nameof(StreamOptions.ReplayBufferCapacity), ex.ParamName);
     }
 
     [Fact]
