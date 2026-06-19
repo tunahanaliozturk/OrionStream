@@ -20,10 +20,11 @@ public sealed class StreamOptions
 
     /// <summary>
     /// How many of the most recent events per topic are retained for replay when a client resumes
-    /// with a <c>Last-Event-ID</c>. The hub stamps each published event with a topic-monotonic id
-    /// and keeps the newest <see cref="ReplayBufferCapacity"/> events; a resume with a known id
-    /// replays only the events after it, while an unknown or evicted id falls back to a from-now
-    /// stream. Set to 0 to disable replay entirely. Default 256.
+    /// with a <c>Last-Event-ID</c>. The hub stamps each per-delivery event with a topic-monotonic id
+    /// and keeps the newest <see cref="ReplayBufferCapacity"/> events; a resume with a known id (one
+    /// the buffer still holds, so every event after it survives) replays only the events after it,
+    /// while an unknown, unparsable, or evicted id falls back to a from-now stream with no replay.
+    /// Set to 0 to disable replay entirely. Default 256.
     /// </summary>
     public int ReplayBufferCapacity { get; set; } = 256;
 

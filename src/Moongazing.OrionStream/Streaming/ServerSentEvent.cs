@@ -25,16 +25,25 @@ public sealed class ServerSentEvent
     /// topic-monotonic id on publish (see <see cref="SequenceId"/>) so that resume via
     /// <c>Last-Event-ID</c> works without the producer assigning ids by hand. A producer-supplied id
     /// always takes precedence over the assigned one on the wire.
+    /// <para>
+    /// Resume contract: only the hub-assigned monotonic <see cref="SequenceId"/> is a valid resume
+    /// cursor. A producer-supplied <see cref="Id"/> is emitted verbatim on the wire but is NOT
+    /// parsed back into a buffer position, so a client that reconnects with a producer id resumes
+    /// from now (no replay) rather than risking a wrong or partial backfill. See
+    /// <see cref="ISseHub.Subscribe(string, string?)"/>.
+    /// </para>
     /// </remarks>
     public string? Id { get; init; }
 
     /// <summary>
-    /// The topic-monotonic id <see cref="SseHub"/> assigns to this event on publish, or null if it
-    /// has not been published through a hub. The hub stamps this in place so the very same instance
-    /// is broadcast to every subscriber and retained for replay. <see cref="Id"/> takes precedence
-    /// over this value when both are present; <see cref="EffectiveId"/> resolves the wire id.
+    /// The topic-monotonic id <see cref="SseHub"/> assigns to this delivery on publish, or null if
+    /// this instance has not been stamped by a hub. The hub never mutates the producer's instance:
+    /// it stamps a per-delivery copy (see <see cref="WithSequence(long)"/>) so the same source
+    /// instance published more than once cannot have its id overwritten. <see cref="Id"/> takes
+    /// precedence over this value when both are present; <see cref="EffectiveId"/> resolves the wire
+    /// id.
     /// </summary>
-    internal long? SequenceId { get; set; }
+    internal long? SequenceId { get; private init; }
 
     /// <summary>
     /// The id rendered on the wire: the producer-supplied <see cref="Id"/> if present, otherwise the
@@ -48,4 +57,20 @@ public sealed class ServerSentEvent
     /// before reconnecting, or null to leave the client default.
     /// </summary>
     public int? RetryMilliseconds { get; init; }
+
+    /// <summary>
+    /// Produce a per-delivery copy of this event carrying the hub-assigned monotonic sequence. The
+    /// source instance is never mutated, so publishing the same instance again (to this or another
+    /// topic) yields an independent delivery with its own correct wire id.
+    /// </summary>
+    /// <param name="sequence">The topic-monotonic sequence assigned to this delivery.</param>
+    /// <returns>A new event identical to this one but stamped with <paramref name="sequence"/>.</returns>
+    internal ServerSentEvent WithSequence(long sequence) => new()
+    {
+        Data = Data,
+        EventName = EventName,
+        Id = Id,
+        RetryMilliseconds = RetryMilliseconds,
+        SequenceId = sequence,
+    };
 }

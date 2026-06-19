@@ -10,19 +10,25 @@ using Moongazing.OrionStream.Diagnostics;
 /// <summary>
 /// Default <see cref="ISseHub"/>. Each subscriber gets a bounded channel in
 /// <see cref="BoundedChannelFullMode.DropOldest"/> mode, so a publish is never blocked by a slow
-/// reader; a full buffer drops its oldest event. Topics are tracked lazily and removed once their
-/// last subscriber leaves.
+/// reader; a full buffer drops its oldest event. Topics are tracked lazily and reclaimed once their
+/// last subscriber leaves and no replay backlog needs to survive the gap.
 /// </summary>
 /// <remarks>
 /// The hub stamps every published event with a topic-monotonic id (the SSE <c>id:</c> field) when
 /// the producer did not supply one, and keeps the newest
 /// <see cref="StreamOptions.ReplayBufferCapacity"/> events per topic so a client reconnecting with a
-/// <c>Last-Event-ID</c> can resume without gaps. See <see cref="Subscribe(string, string?)"/> for
-/// the resume policy.
+/// <c>Last-Event-ID</c> can resume without gaps. The sequence is associated with each per-delivery
+/// copy and replay-buffer entry, never with the producer's shared instance, so the same instance
+/// published twice yields independent, correct wire ids. See <see cref="Subscribe(string, string?)"/>
+/// for the resume policy.
 /// </remarks>
 public sealed class SseHub : ISseHub
 {
     private readonly ConcurrentDictionary<string, Topic> topics = new(StringComparer.Ordinal);
+
+    // Serializes topic creation, subscriber registration, and topic removal so a removal can never
+    // race a concurrent subscribe into orphaning a subscriber on a detached Topic instance.
+    private readonly object lifecycle = new();
     private readonly StreamOptions options;
     private readonly StreamDiagnostics diagnostics;
 
@@ -54,12 +60,18 @@ public sealed class SseHub : ISseHub
         });
 
         var id = Guid.NewGuid();
-        var topicState = topics.GetOrAdd(topic, t => new Topic(t, options.ReplayBufferCapacity));
 
-        // Register the subscriber and replay any backlog under the topic lock, so a publish racing
-        // with this subscribe either lands fully in the replay we copy out or fully in the live
-        // channel we just registered. That ordering is what prevents a missed or duplicated event.
-        topicState.AddSubscriber(id, channel, lastEventId);
+        // Register the subscriber and replay any backlog under the lifecycle lock, so a publish
+        // racing with this subscribe either lands fully in the replay we copy out or fully in the
+        // live channel we just registered, and so a concurrent topic removal cannot drop the topic
+        // we are attaching to. That ordering is what prevents a missed, duplicated, or orphaned
+        // event.
+        lock (lifecycle)
+        {
+            var topicState = topics.GetOrAdd(topic, t => new Topic(t, options.ReplayBufferCapacity));
+            topicState.AddSubscriber(id, channel, lastEventId);
+        }
+
         diagnostics.IncrementSubscribers();
 
         return new StreamSubscription(topic, channel.Reader, () => Unsubscribe(topic, id, channel));
@@ -79,7 +91,12 @@ public sealed class SseHub : ISseHub
             // Retain (or create) the topic so its bounded replay buffer accumulates even with no
             // live subscriber. That is what lets a client that fully disconnected resume after it
             // reconnects with a Last-Event-ID. The buffer is bounded, so per-topic memory is capped.
-            topicState = topics.GetOrAdd(topic, t => new Topic(t, options.ReplayBufferCapacity));
+            // GetOrAdd is taken under the lifecycle lock so a concurrent unsubscribe-driven removal
+            // cannot delete the entry between create and use.
+            lock (lifecycle)
+            {
+                topicState = topics.GetOrAdd(topic, t => new Topic(t, options.ReplayBufferCapacity));
+            }
         }
         else if (!topics.TryGetValue(topic, out topicState))
         {
@@ -96,17 +113,32 @@ public sealed class SseHub : ISseHub
         return topics.TryGetValue(topic, out var topicState) ? topicState.SubscriberCount : 0;
     }
 
+    /// <summary>
+    /// The number of topics the hub currently tracks. Exposed for tests and diagnostics to assert
+    /// that idle topics with no replay backlog are reclaimed rather than leaked.
+    /// </summary>
+    internal int TopicCount => topics.Count;
+
     private void Unsubscribe(string topic, Guid id, Channel<ServerSentEvent> channel)
     {
-        if (topics.TryGetValue(topic, out var topicState) && topicState.RemoveSubscriber(id))
+        lock (lifecycle)
         {
+            if (!topics.TryGetValue(topic, out var topicState) || !topicState.RemoveSubscriber(id))
+            {
+                return;
+            }
+
             channel.Writer.TryComplete();
             diagnostics.DecrementSubscribers();
 
-            // With replay disabled, drop the topic once empty so the map does not grow unbounded
-            // with idle topics. With replay enabled the topic is kept so its bounded buffer survives
-            // a zero-subscriber gap and a reconnecting client can still resume.
-            if (options.ReplayBufferCapacity == 0 && topicState.IsEmpty)
+            // Reclaim the topic once its last subscriber leaves UNLESS it still holds replay backlog
+            // that a reconnecting client might resume from. An empty replay buffer (replay disabled,
+            // or enabled but nothing retained) carries no resume value, so the topic is dropped to
+            // keep the map from leaking one entry per short-lived, distinct topic name. Removal runs
+            // under the same lock as subscribe registration, so it cannot orphan a concurrent
+            // subscribe: that subscribe either ran first (topic non-empty, not removed) or runs
+            // after and re-adds the topic via GetOrAdd.
+            if (topicState.IsEmpty && !topicState.HasReplayBacklog)
             {
                 topics.TryRemove(new KeyValuePair<string, Topic>(topic, topicState));
             }
@@ -141,20 +173,42 @@ public sealed class SseHub : ISseHub
 
         public bool IsEmpty => subscribers.IsEmpty;
 
+        /// <summary>True while the replay buffer holds at least one event a reconnecting client could resume from.</summary>
+        public bool HasReplayBacklog
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return replay.Count > 0;
+                }
+            }
+        }
+
         public void AddSubscriber(Guid id, Channel<ServerSentEvent> channel, string? lastEventId)
         {
             lock (gate)
             {
                 subscribers[id] = channel;
 
-                if (replayCapacity == 0 || !TryParseId(lastEventId, out var resumeFrom))
+                if (replayCapacity == 0 || replay.Count == 0 || !TryParseId(lastEventId, out var resumeFrom))
                 {
                     return;
                 }
 
-                // Replay only events strictly after the client's last seen id that we still hold.
-                // An evicted or unknown id yields nothing here, which is the documented from-now
-                // fallback. TryWrite on a DropOldest channel always succeeds.
+                // Backfill only when the supplied id is a KNOWN position we can resume from without a
+                // gap: it must be no older than the oldest retained entry minus one (so everything
+                // after it is still buffered). The oldest entry has sequence `oldest`; we hold every
+                // event from `oldest` onward, so a client that last saw `oldest - 1` (or anything in
+                // range up to the newest) can be backfilled exactly. An id older than that (evicted),
+                // or newer than anything retained, is treated as unknown and falls back to from-now:
+                // no replay. TryWrite on a DropOldest channel always succeeds.
+                var oldest = replay.Peek().Sequence;
+                if (resumeFrom < oldest - 1)
+                {
+                    return; // evicted / unknown: from-now fallback.
+                }
+
                 foreach (var entry in replay)
                 {
                     if (entry.Sequence > resumeFrom)
@@ -173,10 +227,12 @@ public sealed class SseHub : ISseHub
             {
                 var assigned = ++sequence;
 
-                // Stamp the monotonic sequence id in place so the very same instance is broadcast to
-                // every subscriber (and held for replay). The producer's own Id, if any, still wins
-                // on the wire via ServerSentEvent.EffectiveId; this never overwrites it.
-                evt.SequenceId = assigned;
+                // Stamp the monotonic sequence onto a per-delivery COPY, never the producer's shared
+                // instance, so re-publishing the same instance cannot retroactively rewrite the wire
+                // id of an older buffered or in-flight delivery. The producer's own Id, if any, still
+                // wins on the wire via ServerSentEvent.EffectiveId. The same stamped copy is the one
+                // broadcast to every subscriber and retained for replay.
+                var delivery = evt.WithSequence(assigned);
 
                 if (replayCapacity > 0)
                 {
@@ -184,7 +240,7 @@ public sealed class SseHub : ISseHub
                     {
                         replay.Dequeue();
                     }
-                    replay.Enqueue(new ReplayEntry(assigned, evt));
+                    replay.Enqueue(new ReplayEntry(assigned, delivery));
                 }
 
                 var delivered = 0;
@@ -196,7 +252,7 @@ public sealed class SseHub : ISseHub
                     {
                         diagnostics.Dropped.Add(1);
                     }
-                    if (channel.Writer.TryWrite(evt))
+                    if (channel.Writer.TryWrite(delivery))
                     {
                         delivered++;
                     }

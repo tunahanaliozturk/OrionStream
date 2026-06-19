@@ -149,18 +149,39 @@ public sealed class SseHubResumeTests
     }
 
     [Fact]
-    public void An_evicted_id_falls_back_to_replaying_what_remains()
+    public void An_evicted_id_falls_back_to_a_from_now_stream()
     {
         using var diag = new StreamDiagnostics();
         var hub = NewHub(diag, replayCapacity: 2);
 
-        hub.Publish("orders", Event("a")); // id 1, later evicted
-        hub.Publish("orders", Event("b")); // id 2
-        hub.Publish("orders", Event("c")); // id 3, evicts id 1
+        hub.Publish("orders", Event("a")); // id 1, evicted below
+        hub.Publish("orders", Event("b")); // id 2, evicted below
+        hub.Publish("orders", Event("c")); // id 3
+        hub.Publish("orders", Event("d")); // id 4; buffer now holds 3,4 (oldest retained is 3)
 
-        // The client last saw id 1, which is gone. Everything still buffered (after id 1) replays.
+        // The client last saw id 1. Id 2 was published after it but has since been evicted, so
+        // replaying "what remains" (3,4) would leave a gap the client never sees. Id 1 is older than
+        // oldestRetained(3) - 1, so the documented contract is from-now: no replay.
         using var resumed = hub.Subscribe("orders", lastEventId: "1");
+        Assert.Empty(Drain(resumed));
 
+        hub.Publish("orders", Event("e")); // id 5, live
+        Assert.Equal("e", Datas(Drain(resumed)));
+    }
+
+    [Fact]
+    public void Resuming_from_the_oldest_retained_id_minus_one_still_replays_the_whole_buffer()
+    {
+        using var diag = new StreamDiagnostics();
+        var hub = NewHub(diag, replayCapacity: 2);
+
+        hub.Publish("orders", Event("a")); // id 1, evicted below
+        hub.Publish("orders", Event("b")); // id 2 (oldest retained)
+        hub.Publish("orders", Event("c")); // id 3
+
+        // id 1 == oldestRetained(2) - 1, so every event the client has not seen (2,3) is still
+        // held: this is a known position and replays exactly, with no gap.
+        using var resumed = hub.Subscribe("orders", lastEventId: "1");
         Assert.Equal("b,c", Datas(Drain(resumed)));
     }
 
@@ -187,8 +208,10 @@ public sealed class SseHubResumeTests
             hub.Publish("orders", Event(i.ToString(CultureInfo.InvariantCulture)));
         }
 
-        // Only the newest 3 (ids 8,9,10) survive. Resuming before them replays exactly those 3.
-        using var resumed = hub.Subscribe("orders", lastEventId: "0");
+        // Only the newest 3 (ids 8,9,10) survive. Resuming from id 7 (the oldest retained id minus
+        // one) is a known position and replays exactly those 3. Resuming from an evicted id such as
+        // "0" would instead fall back to from-now (covered separately).
+        using var resumed = hub.Subscribe("orders", lastEventId: "7");
 
         var replayed = Drain(resumed);
         Assert.Equal(3, replayed.Count);
