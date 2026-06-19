@@ -175,7 +175,10 @@ The hub retains the newest `StreamOptions.ReplayBufferCapacity` events per topic
 reconnect it matches the client's `Last-Event-ID` against the wire id of each retained event:
 
 - A match replays only the events published after that id, then live events flow. The client misses
-  nothing.
+  nothing, provided `StreamOptions.SubscriberCapacity` covers the replay burst: replayed events share
+  the subscriber's bounded `DropOldest` channel, so if the backlog to replay exceeds
+  `SubscriberCapacity` the oldest replayed entries are dropped. When gap-free resume matters, size
+  `SubscriberCapacity` at least as large as `ReplayBufferCapacity` (plus live headroom).
 - An unknown or evicted id (older than the buffer still holds, or one the buffer never saw) falls
   back to a from-now stream with no replay. Resume is all-or-nothing: a client either resumes exactly
   or starts clean, never on a partial backlog.
