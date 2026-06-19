@@ -17,6 +17,7 @@ internal static class Program
         HubPublishSubscribeDemo.Run();
         BackpressureDemo.Run();
         SubscriberLifecycleDemo.Run();
+        ResumeDemo.Run();
         await ConcurrentStreamDemo.RunAsync().ConfigureAwait(false);
 
         Console.WriteLine();

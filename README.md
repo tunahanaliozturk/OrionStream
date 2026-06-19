@@ -43,8 +43,11 @@ the response body.
   and strips stray newlines from single-line fields.
 - **Heartbeats.** The writer sends an SSE comment line on an idle stream so proxies and load
   balancers keep the connection open.
-- **Last-Event-ID resume.** Set `ServerSentEvent.Id` and the browser echoes it as `Last-Event-ID`
-  on reconnect, which the server can read to resume.
+- **Last-Event-ID resume.** Every published event carries a wire `id:`, either the producer-supplied
+  `ServerSentEvent.Id` or a hub-assigned topic-monotonic sequence. A bounded per-topic replay buffer
+  (`StreamOptions.ReplayBufferCapacity`, default 256, set to `0` to disable) retains the most recent
+  events, so a client that reconnects with `Subscribe(topic, lastEventId)` resumes after its
+  `Last-Event-ID` with no gap. An unknown or evicted id falls back to a from-now stream.
 - **Built-in metrics.** A `System.Diagnostics.Metrics` meter named `Moongazing.OrionStream` exposes
   published and dropped counters and a current-subscribers gauge.
 - **Multi-targeted.** `net8.0`, `net9.0`, `net10.0`, nullable enabled, warnings as errors.
@@ -118,6 +121,7 @@ es.addEventListener("order.created", e => console.log(JSON.parse(e.data)));
 public interface ISseHub
 {
     StreamSubscription Subscribe(string topic);
+    StreamSubscription Subscribe(string topic, string? lastEventId);
     int Publish(string topic, ServerSentEvent evt);
     int SubscriberCount(string topic);
 }
@@ -152,8 +156,47 @@ hub.Publish("orders", new ServerSentEvent { Data = "3" }); // evicts "1"; reader
 
 This is a deliberate trade-off: OrionStream favors keeping every stream live and current over
 guaranteeing delivery of every event to a client that cannot keep up. Pick `SubscriberCapacity`
-large enough to ride out normal bursts; use `ServerSentEvent.Id` plus a server-side replay source if
-a client must recover events it missed.
+large enough to ride out normal bursts; for a client that drops the connection and must recover the
+events it missed while away, use the built-in `Last-Event-ID` resume below.
+
+### Last-Event-ID resume
+
+A browser `EventSource` remembers the `id:` of the last event it received and sends it back as the
+`Last-Event-ID` request header when it reconnects. The `Subscribe(topic, lastEventId)` overload turns
+that header into a gap-free resume.
+
+For this to work every event needs a wire id. The hub assigns one automatically: when a producer does
+not set `ServerSentEvent.Id`, the hub stamps a topic-monotonic sequence as the `id:` on the wire. A
+producer-supplied `Id` always takes precedence and round-trips through resume unchanged, so you can
+resume against your own ids (an order id, a database row version) or let the hub number events for
+you.
+
+The hub retains the newest `StreamOptions.ReplayBufferCapacity` events per topic (default 256). On
+reconnect it matches the client's `Last-Event-ID` against the wire id of each retained event:
+
+- A match replays only the events published after that id, then live events flow. The client misses
+  nothing, provided `StreamOptions.SubscriberCapacity` covers the replay burst: replayed events share
+  the subscriber's bounded `DropOldest` channel, so if the backlog to replay exceeds
+  `SubscriberCapacity` the oldest replayed entries are dropped. When gap-free resume matters, size
+  `SubscriberCapacity` at least as large as `ReplayBufferCapacity` (plus live headroom).
+- An unknown or evicted id (older than the buffer still holds, or one the buffer never saw) falls
+  back to a from-now stream with no replay. Resume is all-or-nothing: a client either resumes exactly
+  or starts clean, never on a partial backlog.
+
+Read the header from the request and pass it straight to `Subscribe`:
+
+```csharp
+app.MapGet("/events/orders", async (HttpContext ctx, ISseHub hub, StreamOptions options) =>
+{
+    var lastEventId = ctx.Request.Headers["Last-Event-ID"].FirstOrDefault();
+    using var subscription = hub.Subscribe("orders", lastEventId);
+    await ctx.Response.WriteStreamAsync(subscription, options.HeartbeatInterval, ctx.RequestAborted);
+});
+```
+
+Set `ReplayBufferCapacity` to `0` to disable replay entirely; every subscribe then starts from now.
+Sizing the buffer is the usual trade-off: it bounds how long a client can be disconnected and still
+resume without a gap, against the memory held per active topic.
 
 ### The formatter
 
@@ -208,6 +251,7 @@ public sealed class StreamOptions
 {
     public int SubscriberCapacity { get; set; } = 256;
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(15);
+    public int ReplayBufferCapacity { get; set; } = 256;
 }
 ```
 
@@ -215,6 +259,7 @@ public sealed class StreamOptions
 | --- | --- | --- |
 | `SubscriberCapacity` | `256` | Bounded buffer size per subscriber. Must be at least `1`. When a subscriber falls this far behind, its oldest buffered event is dropped to admit the newest. |
 | `HeartbeatInterval` | `15s` | How long a stream may be idle before the writer sends a heartbeat comment. Must be positive. |
+| `ReplayBufferCapacity` | `256` | How many of the most recent events per topic are retained for `Last-Event-ID` resume. Must be zero or greater; `0` disables replay so every subscribe starts from now. |
 
 `AddOrionStream` registers three singletons via `TryAdd`, so you can override any of them before or
 after the call: `StreamOptions`, `StreamDiagnostics`, and `ISseHub` (implemented by `SseHub`).
@@ -294,7 +339,7 @@ dotnet run -c Release --project benchmarks/Moongazing.OrionStream.Benchmarks -- 
 
 ## Versioning
 
-OrionStream is at **0.1.0**. While it is pre-1.0 the public API may still change between minor
+OrionStream is at **0.2.0**. While it is pre-1.0 the public API may still change between minor
 versions; once it reaches 1.0 it will follow [SemVer 2.0.0](https://semver.org/). See
 [CHANGELOG.md](CHANGELOG.md) for the per-release history.
 

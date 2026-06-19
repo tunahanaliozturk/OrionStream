@@ -16,7 +16,7 @@ internal static class ConcurrentStreamDemo
 
     public static async Task RunAsync()
     {
-        DemoConsole.Header("5. Concurrent async publish / drain (bounded, terminates)");
+        DemoConsole.Header("6. Concurrent async publish / drain (bounded, terminates)");
 
         using var diagnostics = new StreamDiagnostics();
         var hub = new SseHub(new StreamOptions { SubscriberCapacity = 64 }, diagnostics);
