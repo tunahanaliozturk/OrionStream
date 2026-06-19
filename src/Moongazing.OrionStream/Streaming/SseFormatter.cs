@@ -21,9 +21,9 @@ public static class SseFormatter
 
         var builder = new StringBuilder();
 
-        if (evt.Id is not null)
+        if (evt.EffectiveId is { } effectiveId)
         {
-            builder.Append("id: ").Append(SingleLine(evt.Id)).Append('\n');
+            builder.Append("id: ").Append(SingleLine(effectiveId)).Append('\n');
         }
         if (evt.EventName is not null)
         {

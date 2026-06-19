@@ -231,7 +231,7 @@ public sealed class SseHubBehaviorTests
     }
 
     [Fact]
-    public void The_same_event_instance_is_delivered_to_every_subscriber()
+    public void The_same_per_delivery_event_is_broadcast_to_every_subscriber()
     {
         using var diag = new StreamDiagnostics();
         var hub = NewHub(diag);
@@ -243,7 +243,35 @@ public sealed class SseHubBehaviorTests
 
         Assert.True(a.Reader.TryRead(out var fromA));
         Assert.True(b.Reader.TryRead(out var fromB));
-        Assert.Same(evt, fromA);
-        Assert.Same(evt, fromB);
+
+        // Instance identity is intentionally NOT preserved: the hub stamps a per-delivery copy
+        // rather than mutating the caller's instance, which is what stops a re-published instance
+        // from rewriting an older delivery's wire id. The producer's instance is never handed out.
+        Assert.NotSame(evt, fromA);
+        // One publish is one delivery, so every subscriber sees the very same stamped copy.
+        Assert.Same(fromA, fromB);
+        Assert.Equal("shared", fromA!.Data);
+        Assert.Equal("1", fromA.EffectiveId);
+    }
+
+    [Fact]
+    public void Republishing_the_same_instance_yields_independent_wire_ids()
+    {
+        using var diag = new StreamDiagnostics();
+        var hub = NewHub(diag);
+        using var sub = hub.Subscribe("orders");
+        var evt = Event("reused");
+
+        hub.Publish("orders", evt); // delivery sequence 1
+        hub.Publish("orders", evt); // same instance, delivery sequence 2
+
+        Assert.True(sub.Reader.TryRead(out var first));
+        Assert.True(sub.Reader.TryRead(out var second));
+        Assert.Equal("1", first!.EffectiveId);
+        Assert.Equal("2", second!.EffectiveId);
+        // The earlier delivery's id is not retroactively rewritten by the later publish.
+        Assert.NotSame(first, second);
+        // And the caller's own instance was never stamped at all.
+        Assert.Null(evt.EffectiveId);
     }
 }
