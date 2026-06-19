@@ -1,7 +1,6 @@
 namespace Moongazing.OrionStream.Streaming;
 
 using System.Collections.Concurrent;
-using System.Globalization;
 using System.Threading.Channels;
 
 using Moongazing.OrionStream;
@@ -19,8 +18,11 @@ using Moongazing.OrionStream.Diagnostics;
 /// <see cref="StreamOptions.ReplayBufferCapacity"/> events per topic so a client reconnecting with a
 /// <c>Last-Event-ID</c> can resume without gaps. The sequence is associated with each per-delivery
 /// copy and replay-buffer entry, never with the producer's shared instance, so the same instance
-/// published twice yields independent, correct wire ids. See <see cref="Subscribe(string, string?)"/>
-/// for the resume policy.
+/// published twice yields independent, correct wire ids. Resume matches the returning
+/// <c>Last-Event-ID</c> against the exact value each buffered entry emitted on the wire (the producer
+/// id if the event set one, otherwise the hub sequence), so producer-supplied ids round-trip through
+/// resume just like hub sequences. See <see cref="Subscribe(string, string?)"/> for the resume
+/// policy.
 /// </remarks>
 public sealed class SseHub : ISseHub
 {
@@ -191,27 +193,40 @@ public sealed class SseHub : ISseHub
             {
                 subscribers[id] = channel;
 
-                if (replayCapacity == 0 || replay.Count == 0 || !TryParseId(lastEventId, out var resumeFrom))
+                if (replayCapacity == 0 || replay.Count == 0 || string.IsNullOrEmpty(lastEventId))
                 {
                     return;
                 }
 
-                // Backfill only when the supplied id is a KNOWN position we can resume from without a
-                // gap: it must be no older than the oldest retained entry minus one (so everything
-                // after it is still buffered). The oldest entry has sequence `oldest`; we hold every
-                // event from `oldest` onward, so a client that last saw `oldest - 1` (or anything in
-                // range up to the newest) can be backfilled exactly. An id older than that (evicted),
-                // or newer than anything retained, is treated as unknown and falls back to from-now:
-                // no replay. TryWrite on a DropOldest channel always succeeds.
-                var oldest = replay.Peek().Sequence;
-                if (resumeFrom < oldest - 1)
+                // Locate the resume point by matching the client's Last-Event-ID against the EXACT
+                // value each buffered entry emitted on the wire (its WireId: the producer-supplied id
+                // if the event set one, otherwise the hub sequence). This makes resume correct whether
+                // the producer relied on the hub sequence or set its own ids: the id the browser sends
+                // back is always the id it last saw on the wire, and that is what we match here.
+                //
+                // The monotonic Sequence remains the ordering key: once the matching entry is found we
+                // replay every entry published AFTER it, in buffer order. An id that matches no
+                // retained entry (unknown / evicted / never-existed) yields no resume point, so the
+                // subscription starts from now with no replay. TryWrite on a DropOldest channel always
+                // succeeds.
+                long? resumeAfter = null;
+                foreach (var entry in replay)
                 {
-                    return; // evicted / unknown: from-now fallback.
+                    if (string.Equals(entry.WireId, lastEventId, StringComparison.Ordinal))
+                    {
+                        resumeAfter = entry.Sequence;
+                        break;
+                    }
+                }
+
+                if (resumeAfter is not { } afterSequence)
+                {
+                    return; // unknown / evicted: from-now fallback.
                 }
 
                 foreach (var entry in replay)
                 {
-                    if (entry.Sequence > resumeFrom)
+                    if (entry.Sequence > afterSequence)
                     {
                         channel.Writer.TryWrite(entry.Event);
                     }
@@ -240,7 +255,9 @@ public sealed class SseHub : ISseHub
                     {
                         replay.Dequeue();
                     }
-                    replay.Enqueue(new ReplayEntry(assigned, delivery));
+                    // Capture the value emitted on the wire for this delivery (producer id if set, else
+                    // the hub sequence) so resume can match a returning Last-Event-ID against it.
+                    replay.Enqueue(new ReplayEntry(assigned, delivery.EffectiveId, delivery));
                 }
 
                 var delivered = 0;
@@ -261,14 +278,13 @@ public sealed class SseHub : ISseHub
                 return delivered;
             }
         }
-
-        private static bool TryParseId(string? lastEventId, out long value)
-        {
-            value = 0;
-            return !string.IsNullOrEmpty(lastEventId)
-                && long.TryParse(lastEventId, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
-        }
     }
 
-    private readonly record struct ReplayEntry(long Sequence, ServerSentEvent Event);
+    /// <summary>
+    /// A buffered delivery retained for replay. <see cref="Sequence"/> is the monotonic ordering key;
+    /// <see cref="WireId"/> is the exact value emitted as this delivery's SSE <c>id:</c> (producer id
+    /// if the event set one, else the hub sequence) and is what a returning Last-Event-ID is matched
+    /// against to locate the resume point.
+    /// </summary>
+    private readonly record struct ReplayEntry(long Sequence, string? WireId, ServerSentEvent Event);
 }

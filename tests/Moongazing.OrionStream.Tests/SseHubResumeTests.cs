@@ -170,7 +170,7 @@ public sealed class SseHubResumeTests
     }
 
     [Fact]
-    public void Resuming_from_the_oldest_retained_id_minus_one_still_replays_the_whole_buffer()
+    public void Resuming_from_the_oldest_retained_id_replays_the_rest_of_the_buffer()
     {
         using var diag = new StreamDiagnostics();
         var hub = NewHub(diag, replayCapacity: 2);
@@ -179,10 +179,10 @@ public sealed class SseHubResumeTests
         hub.Publish("orders", Event("b")); // id 2 (oldest retained)
         hub.Publish("orders", Event("c")); // id 3
 
-        // id 1 == oldestRetained(2) - 1, so every event the client has not seen (2,3) is still
-        // held: this is a known position and replays exactly, with no gap.
-        using var resumed = hub.Subscribe("orders", lastEventId: "1");
-        Assert.Equal("b,c", Datas(Drain(resumed)));
+        // id 2 is the oldest entry the buffer still holds, so its wire id matches and everything
+        // after it (3) replays exactly, with no gap.
+        using var resumed = hub.Subscribe("orders", lastEventId: "2");
+        Assert.Equal("c", Datas(Drain(resumed)));
     }
 
     [Fact]
@@ -208,15 +208,15 @@ public sealed class SseHubResumeTests
             hub.Publish("orders", Event(i.ToString(CultureInfo.InvariantCulture)));
         }
 
-        // Only the newest 3 (ids 8,9,10) survive. Resuming from id 7 (the oldest retained id minus
-        // one) is a known position and replays exactly those 3. Resuming from an evicted id such as
-        // "0" would instead fall back to from-now (covered separately).
-        using var resumed = hub.Subscribe("orders", lastEventId: "7");
+        // Only the newest 3 (ids 8,9,10) survive. Resuming from id 8 (the oldest retained id) matches
+        // its wire id and replays everything after it (9,10). An evicted id such as "7" or "0" would
+        // instead fall back to from-now (covered separately).
+        using var resumed = hub.Subscribe("orders", lastEventId: "8");
 
         var replayed = Drain(resumed);
-        Assert.Equal(3, replayed.Count);
-        Assert.Equal("8,9,10", Datas(replayed));
-        Assert.Equal("8,9,10", Ids(replayed));
+        Assert.Equal(2, replayed.Count);
+        Assert.Equal("9,10", Datas(replayed));
+        Assert.Equal("9,10", Ids(replayed));
     }
 
     [Fact]
@@ -278,9 +278,85 @@ public sealed class SseHubResumeTests
             hub.Publish("orders", Event(i.ToString(CultureInfo.InvariantCulture)));
         }
 
-        using var resumed = hub.Subscribe("orders", lastEventId: "0");
+        // Resume from id 1 (still buffered): everything after it (2,3,4,5) is replayed, but the
+        // subscriber buffer of 2 with DropOldest keeps only the newest 2.
+        using var resumed = hub.Subscribe("orders", lastEventId: "1");
 
-        // DropOldest keeps the newest 2 of the 5 replayed events.
+        // DropOldest keeps the newest 2 of the 4 replayed events.
         Assert.Equal("4,5", Datas(Drain(resumed)));
+    }
+
+    [Fact]
+    public void Resuming_from_a_producer_supplied_custom_id_replays_only_subsequent_events()
+    {
+        using var diag = new StreamDiagnostics();
+        var hub = NewHub(diag);
+
+        // Each event carries its own producer-supplied wire id; the browser would reconnect with the
+        // exact custom id it last saw, not the hub sequence.
+        hub.Publish("orders", new ServerSentEvent { Data = "a", Id = "evt-a" });
+        hub.Publish("orders", new ServerSentEvent { Data = "b", Id = "evt-b" });
+        hub.Publish("orders", new ServerSentEvent { Data = "c", Id = "evt-c" });
+
+        using var resumed = hub.Subscribe("orders", lastEventId: "evt-a");
+
+        var replayed = Drain(resumed);
+        // The custom id round-trips: replay starts AFTER evt-a, not from-now and not from nothing.
+        Assert.Equal("b,c", Datas(replayed));
+        Assert.Equal("evt-b,evt-c", Ids(replayed));
+    }
+
+    [Fact]
+    public void Resuming_from_a_producer_id_then_receiving_live_events_is_seamless()
+    {
+        using var diag = new StreamDiagnostics();
+        var hub = NewHub(diag);
+
+        hub.Publish("orders", new ServerSentEvent { Data = "a", Id = "evt-a" });
+        hub.Publish("orders", new ServerSentEvent { Data = "b", Id = "evt-b" });
+
+        using var resumed = hub.Subscribe("orders", lastEventId: "evt-a");
+        hub.Publish("orders", new ServerSentEvent { Data = "c", Id = "evt-c" }); // live
+
+        var events = Drain(resumed);
+        Assert.Equal("b,c", Datas(events));
+        Assert.Equal("evt-b,evt-c", Ids(events));
+    }
+
+    [Fact]
+    public void An_unknown_producer_custom_id_falls_back_to_a_from_now_stream()
+    {
+        using var diag = new StreamDiagnostics();
+        var hub = NewHub(diag);
+
+        hub.Publish("orders", new ServerSentEvent { Data = "a", Id = "evt-a" });
+        hub.Publish("orders", new ServerSentEvent { Data = "b", Id = "evt-b" });
+
+        // A custom id that no buffered entry ever emitted: from-now, no replay.
+        using var resumed = hub.Subscribe("orders", lastEventId: "evt-never");
+        Assert.Empty(Drain(resumed));
+
+        hub.Publish("orders", new ServerSentEvent { Data = "c", Id = "evt-c" });
+        Assert.Equal("c", Datas(Drain(resumed)));
+    }
+
+    [Fact]
+    public void An_evicted_producer_custom_id_falls_back_to_a_from_now_stream()
+    {
+        using var diag = new StreamDiagnostics();
+        var hub = NewHub(diag, replayCapacity: 2);
+
+        hub.Publish("orders", new ServerSentEvent { Data = "a", Id = "evt-a" }); // evicted below
+        hub.Publish("orders", new ServerSentEvent { Data = "b", Id = "evt-b" }); // evicted below
+        hub.Publish("orders", new ServerSentEvent { Data = "c", Id = "evt-c" });
+        hub.Publish("orders", new ServerSentEvent { Data = "d", Id = "evt-d" }); // buffer holds c,d
+
+        // evt-a was published but has since been evicted; replaying what remains (c,d) would leave a
+        // gap (b) the client never sees, so the contract is from-now.
+        using var resumed = hub.Subscribe("orders", lastEventId: "evt-a");
+        Assert.Empty(Drain(resumed));
+
+        hub.Publish("orders", new ServerSentEvent { Data = "e", Id = "evt-e" }); // live
+        Assert.Equal("e", Datas(Drain(resumed)));
     }
 }

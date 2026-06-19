@@ -26,11 +26,13 @@ public sealed class ServerSentEvent
     /// <c>Last-Event-ID</c> works without the producer assigning ids by hand. A producer-supplied id
     /// always takes precedence over the assigned one on the wire.
     /// <para>
-    /// Resume contract: only the hub-assigned monotonic <see cref="SequenceId"/> is a valid resume
-    /// cursor. A producer-supplied <see cref="Id"/> is emitted verbatim on the wire but is NOT
-    /// parsed back into a buffer position, so a client that reconnects with a producer id resumes
-    /// from now (no replay) rather than risking a wrong or partial backfill. See
-    /// <see cref="ISseHub.Subscribe(string, string?)"/>.
+    /// Resume contract: resume matches a client's <c>Last-Event-ID</c> against the id that was
+    /// emitted on the wire for each buffered event, which is this <see cref="Id"/> when the producer
+    /// set one and the hub-assigned <see cref="SequenceId"/> otherwise. So a producer-supplied
+    /// <see cref="Id"/> round-trips through resume: a client that reconnects with the exact custom id
+    /// it last saw replays the subsequent buffered events, just like a client resuming from a hub
+    /// sequence. An id that matches no retained entry (unknown or evicted) yields a from-now stream
+    /// with no replay. See <see cref="ISseHub.Subscribe(string, string?)"/>.
     /// </para>
     /// </remarks>
     public string? Id { get; init; }

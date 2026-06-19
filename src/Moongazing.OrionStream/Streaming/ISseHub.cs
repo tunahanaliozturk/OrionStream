@@ -18,20 +18,19 @@ public interface ISseHub
     /// Subscribe to a topic, optionally resuming after a client-supplied <c>Last-Event-ID</c>.
     /// </summary>
     /// <remarks>
-    /// Only the hub-assigned monotonic sequence is a valid resume cursor. When
-    /// <paramref name="lastEventId"/> parses to a sequence that is still a known position in the
-    /// topic replay buffer (no older than the oldest retained entry, so every event after it is
-    /// still held), the events published after it are replayed into the subscription before live
-    /// events flow, so the client misses nothing across a reconnect. In every other case the
-    /// subscription starts from now with no replay (the from-now fallback):
+    /// Resume matches <paramref name="lastEventId"/> against the id that was emitted on the wire for
+    /// each buffered event: the producer-supplied <see cref="ServerSentEvent.Id"/> if the event set
+    /// one, otherwise the hub-assigned monotonic sequence. When <paramref name="lastEventId"/>
+    /// exactly equals the wire id of some retained entry, the events published after that entry are
+    /// replayed into the subscription before live events flow, so the client misses nothing across a
+    /// reconnect. This is true whether the producer relied on the hub sequence or set its own ids:
+    /// the id the browser sends back is the id it last saw on the wire, and that is exactly what is
+    /// matched here. In every other case the subscription starts from now with no replay (the
+    /// from-now fallback):
     /// <list type="bullet">
     /// <item><description><paramref name="lastEventId"/> is null or empty.</description></item>
-    /// <item><description>It does not parse as a hub sequence (for example a producer-supplied GUID
-    /// or business id set via <see cref="ServerSentEvent.Id"/>). A producer id is emitted verbatim
-    /// on the wire but is never treated as a resume cursor, so reconnecting with one yields a
-    /// from-now stream rather than a wrong or partial backfill.</description></item>
-    /// <item><description>It is older than the buffer still holds (evicted) or names a position the
-    /// buffer never saw.</description></item>
+    /// <item><description>It matches no retained entry's wire id: the entry was evicted (older than
+    /// the buffer still holds), or the id names a position the buffer never saw.</description></item>
     /// </list>
     /// The from-now fallback never replays a partial or gapped backlog: a client either resumes
     /// exactly or starts clean. Replay is bounded by
