@@ -1,5 +1,6 @@
 namespace Moongazing.OrionStream.AspNetCore;
 
+using System.Buffers;
 using System.Text;
 
 using Microsoft.AspNetCore.Http;
@@ -68,7 +69,19 @@ public static class SseResponseExtensions
 
     private static async Task WriteAsync(HttpResponse response, string payload, CancellationToken cancellationToken)
     {
-        await response.Body.WriteAsync(Encoding.UTF8.GetBytes(payload), cancellationToken).ConfigureAwait(false);
-        await response.Body.FlushAsync(cancellationToken).ConfigureAwait(false);
+        // Encode into a pooled buffer rather than allocating a fresh byte[] per event on the wire
+        // hot path. The bytes written are identical to Encoding.UTF8.GetBytes(payload).
+        var maxBytes = Encoding.UTF8.GetMaxByteCount(payload.Length);
+        var buffer = ArrayPool<byte>.Shared.Rent(maxBytes);
+        try
+        {
+            var written = Encoding.UTF8.GetBytes(payload, 0, payload.Length, buffer, 0);
+            await response.Body.WriteAsync(buffer.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
+            await response.Body.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 }
