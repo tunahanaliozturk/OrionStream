@@ -71,8 +71,11 @@ public static class SseResponseExtensions
     {
         // Encode into a pooled buffer rather than allocating a fresh byte[] per event on the wire
         // hot path. The bytes written are identical to Encoding.UTF8.GetBytes(payload).
-        var maxBytes = Encoding.UTF8.GetMaxByteCount(payload.Length);
-        var buffer = ArrayPool<byte>.Shared.Rent(maxBytes);
+        // Size the rent by the ACTUAL encoded length, not GetMaxByteCount's worst case (~3x for
+        // mostly-ASCII payloads): this buffer is held across the async write/flush for every
+        // subscriber, so the worst-case size caused large memory spikes under high fanout.
+        var byteCount = Encoding.UTF8.GetByteCount(payload);
+        var buffer = ArrayPool<byte>.Shared.Rent(byteCount);
         try
         {
             var written = Encoding.UTF8.GetBytes(payload, 0, payload.Length, buffer, 0);
