@@ -6,6 +6,20 @@ All notable changes to OrionStream are documented in this file. The format is ba
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-20
+
+### Performance
+
+Reduced per-event allocation on the SSE serialization hot path, with byte-identical wire output.
+
+- `SseFormatter.Format` no longer runs unconditional `Replace`/`Split` passes over the payload, id,
+  and event name. It pre-sizes the `StringBuilder`, splits `data:` lines by scanning spans in place,
+  and strips newlines from the `id:`/`event:` fields only when one is present. Measured allocation
+  drop: about 41% for a single-line data-only event, 26% for a full-metadata event, and 44% for a
+  multi-line payload.
+- `SseResponseExtensions.WriteStreamAsync` encodes each event into a pooled `ArrayPool<byte>` buffer
+  instead of allocating a fresh `byte[]` per write.
+
 ## [0.2.0] - 2026-06-19
 
 ### Added
