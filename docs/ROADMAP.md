@@ -36,7 +36,9 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
 - **`Last-Event-ID` resume (0.2.0).** Every published event carries a wire `id:`, either the
   producer-supplied `ServerSentEvent.Id` or a hub-assigned topic-monotonic sequence. The
   `ISseHub.Subscribe(string topic, string? lastEventId)` overload turns a returning `Last-Event-ID`
-  into a gap-free resume.
+  into a resume that replays the retained backlog. The resume is gap-free as long as that backlog fits
+  the subscriber's buffer; a backlog larger than the subscriber capacity can have its oldest replayed
+  events evicted under the channel's `DropOldest` policy before the client reads them.
 - **Bounded per-topic replay buffer (0.2.0).** `StreamOptions.ReplayBufferCapacity` (default 256, `0`
   disables) retains the newest events per topic so a reconnecting client resumes after its last seen
   id. Resume is all-or-nothing: an unknown or evicted id falls back to a from-now stream with no
