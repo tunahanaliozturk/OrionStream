@@ -1,9 +1,11 @@
 # OrionStream Roadmap
 
-OrionStream is at **0.3.0**: an in-process Server-Sent Events hub for ASP.NET Core, with topic
+OrionStream is at **0.4.0**: an in-process Server-Sent Events hub for ASP.NET Core, with topic
 fan-out, `Last-Event-ID` resume from a bounded per-topic replay buffer, an allocation-light wire
-writer, a one-line endpoint mapping helper, typed and async-enumerable publish/consume sugar, and
-per-topic metric tags plus a publish/subscribe `ActivitySource`.
+writer, a one-line endpoint mapping helper, typed and async-enumerable publish/consume sugar,
+per-topic metric tags plus a publish/subscribe `ActivitySource`, and a configurable delivery and
+back-pressure surface (full-buffer policy, slow-consumer disconnect, per-topic capacity overrides,
+and per-subscriber filtering).
 
 This is a list of ideas under consideration, not a schedule and not a set of promises. Items here
 may ship, change shape, or be dropped. The goal is to be honest about what the library does today
@@ -63,6 +65,21 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
   `orionstream.dropped` now carry an `orionstream.topic` tag, and `StreamDiagnostics` exposes an
   `ActivitySource` named `Moongazing.OrionStream` with `OrionStream.Publish` and
   `OrionStream.Subscribe` spans tagged with the topic.
+- **Configurable full-buffer policy (0.4.0).** `StreamOptions.FullBufferPolicy` chooses what happens
+  when a subscriber buffer is full: `DropOldest` (default, unchanged), `DropNewest`, or a bounded
+  `Wait` capped by `StreamOptions.MaxPublishWait`. `Wait` is the one policy that can apply
+  back-pressure to the publisher, so it requires the explicit cap; the drop policies keep the
+  never-blocks guarantee.
+- **Slow-consumer disconnect (0.4.0).** The opt-in `StreamOptions.SlowConsumerPolicy` disconnects a
+  subscriber whose buffer stays full on `MaxConsecutiveFullPublishes` publishes in a row, shedding a
+  wedged client instead of feeding it a permanently lossy stream. A publish that finds room resets the
+  run; disabled by default.
+- **Per-topic capacity overrides (0.4.0).** `StreamOptions.ConfigureTopic` raises or lowers the
+  subscriber and/or replay buffer for one topic without changing the global default for the rest.
+- **Per-subscriber filtering (0.4.0).** `ISseHub.Subscribe(topic, lastEventId, filter)` takes an
+  optional predicate evaluated before the event enters the subscriber's buffer, so a chatty topic does
+  not fill a client's buffer with events it would discard. The filter also applies to replayed backlog
+  on resume.
 
 ---
 
@@ -70,23 +87,6 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
 
 These are possibilities, ordered loosely by how aligned they are with the library's purpose. None is
 committed, and the version tags are targets.
-
-### Delivery and back-pressure (targeting 0.4.0, ~Q4 2026)
-
-- **A configurable full-buffer policy.** Today the per-subscriber buffer is always `DropOldest`. An
-  option to choose drop-newest or a bounded wait could suit callers who would rather slow a producer
-  than lose events. It conflicts with the never-blocks guarantee, so any wait policy would need an
-  explicit cap and clear documentation that it can apply back-pressure to the publisher.
-- **Slow-consumer policy beyond drop counting.** Today a subscriber that cannot keep up silently
-  drops its oldest events and increments `orionstream.dropped`. An opt-in policy to disconnect a
-  subscriber that stays saturated past a threshold would let callers shed a wedged client instead of
-  feeding it a permanently lossy stream.
-- **Per-topic capacity overrides.** Allowing a busy topic to carry a larger subscriber buffer or a
-  larger replay buffer than the global default, without raising it for every topic.
-- **Per-subscriber filtering.** An optional predicate supplied at `Subscribe` time so a subscriber
-  receives only the events on a topic that match it, evaluated before the event enters the
-  subscriber's buffer. This keeps a chatty topic from filling a buffer with events a given client
-  will discard, at the cost of running the predicate once per subscriber per publish.
 
 ### Resume and multi-instance (targeting 0.5.0, ~Q1 2027)
 
@@ -108,7 +108,7 @@ committed, and the version tags are targets.
   to instance A's live subscribers (see non-goals). Whether cross-instance live fan-out is worth
   building at all is an open question to settle after the store abstraction exists.
 
-### Hardening (targeting 0.4.0, ~Q4 2026)
+### Hardening (targeting 0.5.0, ~Q1 2027)
 
 - **Configurable heartbeat and keep-alive.** The heartbeat interval is already configurable; the
   remaining work is letting a caller customize the keep-alive further (for example a different
@@ -119,7 +119,7 @@ committed, and the version tags are targets.
 - **Backpressure-aware write timeouts.** A guard so a wedged client connection cannot hold a writer
   loop open indefinitely beyond cancellation.
 
-### Observability (targeting 0.4.0, ~Q4 2026)
+### Observability (targeting 0.5.0, ~Q1 2027)
 
 - **Resume and replay metrics.** Counters for resume attempts split by outcome (exact resume versus
   from-now fallback) and for replayed events, so operators can see how often clients reconnect with a

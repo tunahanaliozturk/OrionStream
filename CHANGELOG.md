@@ -6,6 +6,45 @@ All notable changes to OrionStream are documented in this file. The format is ba
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-27
+
+### Added
+
+Delivery and back-pressure. All additive; with nothing configured the hub, resume, replay, and the
+drop-oldest default behave exactly as before.
+
+- Configurable full-buffer policy: `StreamOptions.FullBufferPolicy` chooses what happens when a
+  subscriber buffer is full at publish time. `DropOldest` (default, unchanged behavior) evicts the
+  oldest event; `DropNewest` keeps the buffered events and discards the incoming one; `Wait` waits
+  for room up to `StreamOptions.MaxPublishWait` before giving up on that subscriber. `Wait` is the
+  only policy that can apply back-pressure to the publisher, so it requires an explicit
+  `MaxPublishWait` cap (validated on registration) and is documented as such; `DropOldest` and
+  `DropNewest` keep the never-blocks guarantee.
+- Slow-consumer disconnect: an opt-in `StreamOptions.SlowConsumerPolicy` disconnects a subscriber
+  whose buffer stays full on `MaxConsecutiveFullPublishes` publishes in a row, so a wedged client is
+  shed (its channel completed, like a client disconnect) instead of fed a permanently lossy stream.
+  A single publish that finds room resets the run, so a subscriber that briefly saturates and catches
+  up is never disconnected. The threshold is counted in publishes, not wall-clock time, so it is
+  independent of publish rate. Disabled by default.
+- Per-topic capacity overrides: `StreamOptions.ConfigureTopic(topic, ...)` raises (or lowers) the
+  subscriber buffer and/or replay buffer for one topic without changing the global default for every
+  other topic.
+- Per-subscriber filtering: `ISseHub.Subscribe(topic, lastEventId, filter)` takes an optional
+  predicate evaluated once per publish for that subscriber, before the event enters the subscriber's
+  buffer, so a chatty topic does not fill a client's buffer with events it would discard. The filter
+  also applies to replayed events on resume. A null filter delivers every event, matching the
+  existing overloads.
+
+### Tests
+
+26 new tests: drop-newest keeps the oldest and drops the newest under saturation (versus drop-oldest);
+the bounded-wait policy applies back-pressure and proceeds the instant room appears, and gives up
+after its cap when no room appears (both gated on observable state, not timing); a subscriber
+saturated past the threshold is disconnected while one that catches up is not; per-topic subscriber
+and replay overrides give a topic a larger buffer than the global default; a per-subscriber filter
+delivers only matching events, the filtered-out events never enter the buffer or count as delivered,
+and the filter applies to replayed backlog; plus validation of the new options.
+
 ## [0.3.0] - 2026-06-27
 
 ### Added
@@ -106,6 +145,7 @@ Initial release. Server-Sent Events for ASP.NET Core.
 16 tests across the formatter, the hub (fan-out, topic isolation, unsubscribe, drop-oldest,
 double-dispose), the response writer, and registration.
 
+[0.4.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.3.0
 [0.2.1]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.2.1
 [0.2.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.2.0

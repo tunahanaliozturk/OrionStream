@@ -35,9 +35,15 @@ the response body.
 - **Topic-based broadcast hub.** Publish once to a topic; every current subscriber receives the
   event. Topics are created on first subscribe and removed when their last subscriber leaves, so an
   idle topic costs nothing.
-- **Bounded per-subscriber buffering.** Each subscriber gets its own bounded channel in
-  `DropOldest` mode. A publish never blocks: a slow subscriber drops its own oldest event to admit
-  the newest, and a slow client degrades only its own stream.
+- **Bounded per-subscriber buffering.** Each subscriber gets its own bounded channel. By default a
+  publish never blocks: a slow subscriber drops its own oldest event to admit the newest, and a slow
+  client degrades only its own stream.
+- **Configurable delivery and back-pressure.** `StreamOptions.FullBufferPolicy` chooses drop-oldest
+  (default), drop-newest, or a bounded `Wait` that applies back-pressure to the publisher up to
+  `MaxPublishWait`. An opt-in `SlowConsumerPolicy` disconnects a wedged subscriber that stays
+  saturated past a threshold. `ConfigureTopic` overrides the subscriber and replay capacities for one
+  busy topic, and `Subscribe(topic, lastEventId, filter)` delivers only events matching a predicate
+  evaluated before they enter the buffer.
 - **Spec-correct wire format.** `SseFormatter` renders the `text/event-stream` fields in canonical
   order (`id`, `event`, `retry`, `data`), splits multi-line payloads across multiple `data:` lines,
   and strips stray newlines from single-line fields.
@@ -160,6 +166,34 @@ This is a deliberate trade-off: OrionStream favors keeping every stream live and
 guaranteeing delivery of every event to a client that cannot keep up. Pick `SubscriberCapacity`
 large enough to ride out normal bursts; for a client that drops the connection and must recover the
 events it missed while away, use the built-in `Last-Event-ID` resume below.
+
+### Tuning delivery and back-pressure
+
+The drop-oldest default keeps the never-blocks guarantee, but the policy is configurable when a
+caller wants different trade-offs:
+
+```csharp
+builder.Services.AddOrionStream(o =>
+{
+    // Slow a producer instead of losing events, capped so a wedged reader cannot stall it forever.
+    o.FullBufferPolicy = FullBufferPolicy.Wait;
+    o.MaxPublishWait = TimeSpan.FromMilliseconds(200);
+
+    // Shed a subscriber that stays saturated rather than feeding it a permanently lossy stream.
+    o.SlowConsumerPolicy = new SlowConsumerPolicy { MaxConsecutiveFullPublishes = 128 };
+
+    // Give one busy topic a larger buffer without raising the global default.
+    o.ConfigureTopic("ticks", t => { t.SubscriberCapacity = 4096; t.ReplayBufferCapacity = 1024; });
+});
+
+// Deliver only the events this subscriber cares about; the filter runs before the buffer, so the
+// rest never take a slot.
+using var sub = hub.Subscribe("ticks", lastEventId: null, filter: e => e.Data.StartsWith("EURUSD"));
+```
+
+`FullBufferPolicy.DropNewest` keeps the buffered events and discards the incoming one instead of the
+oldest; `FullBufferPolicy.Wait` is the only policy that applies back-pressure to `Publish`, which is
+why it requires `MaxPublishWait`. See [docs/FEATURES.md](docs/FEATURES.md) section 6 for the details.
 
 ### Last-Event-ID resume
 
