@@ -272,6 +272,71 @@ public sealed class SseHubBackpressureTests
     }
 
     [Fact]
+    public void DropNewest_subscriber_resuming_drops_the_newest_replayed_events_under_saturation()
+    {
+        using var diag = new StreamDiagnostics();
+        // Buffer of 3, replay of 10. Six events accumulate in the replay buffer with no live
+        // subscriber. A subscriber then resumes from before the first event, so all six are
+        // candidates for replay into its size-3 buffer.
+        var hub = new SseHub(
+            new StreamOptions
+            {
+                SubscriberCapacity = 3,
+                FullBufferPolicy = FullBufferPolicy.DropNewest,
+                ReplayBufferCapacity = 10,
+            },
+            diag);
+
+        for (var i = 1; i <= 6; i++)
+        {
+            hub.Publish("orders", Event(N(i)));
+        }
+
+        // Resume by matching id "1" so events 2..6 are replayed. Under DropNewest the buffer fills
+        // with the first three replayed events and every later one is the newest and is dropped,
+        // exactly mirroring live DropNewest. A DropOldest replay (the prior bug) would instead have
+        // kept the newest, and the channel's native full-mode would have corrupted the order.
+        using var resume = hub.Subscribe("orders", "1");
+
+        Assert.Equal("2,3,4", string.Join(",", DrainData(resume)));
+    }
+
+    [Fact]
+    public void Replayed_DropNewest_matches_live_DropNewest_for_the_same_event_run()
+    {
+        using var diag = new StreamDiagnostics();
+        var options = new StreamOptions
+        {
+            SubscriberCapacity = 3,
+            FullBufferPolicy = FullBufferPolicy.DropNewest,
+            ReplayBufferCapacity = 10,
+        };
+
+        // Live path: event 1 is published with no subscriber (so it is not delivered), then a
+        // subscriber attaches and live-receives the run 2..6. That run is exactly what the replay
+        // path below replays, so the two must produce an identical buffer.
+        var liveHub = new SseHub(options, diag);
+        liveHub.Publish("orders", Event(N(1)));
+        using var live = liveHub.Subscribe("orders");
+        for (var i = 2; i <= 6; i++)
+        {
+            liveHub.Publish("orders", Event(N(i)));
+        }
+
+        // Replay path: the same six events accumulate first, then a subscriber resumes from id 1,
+        // replaying the same 2..6 run. Resume excludes the event the client last saw (id 1), matching
+        // the live run above.
+        var replayHub = new SseHub(options, diag);
+        for (var i = 1; i <= 6; i++)
+        {
+            replayHub.Publish("orders", Event(N(i)));
+        }
+        using var replay = replayHub.Subscribe("orders", "1");
+
+        Assert.Equal(string.Join(",", DrainData(live)), string.Join(",", DrainData(replay)));
+    }
+
+    [Fact]
     public void A_per_topic_replay_capacity_override_retains_more_backlog_for_that_topic()
     {
         using var diag = new StreamDiagnostics();

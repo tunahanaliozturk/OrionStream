@@ -320,10 +320,15 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
                 {
                     if (entry.Sequence > afterSequence && Accepts(subscriber, entry.Event))
                     {
-                        // Replay into the subscriber's own channel. On a DropOldest/DropNewest channel
-                        // TryWrite always reports a result; on a Wait channel a full buffer simply
-                        // refuses the replayed entry, which is acceptable for backlog catch-up.
-                        subscriber.Channel.Writer.TryWrite(entry.Event);
+                        // Replay through the SAME policy-honoring enqueue as live publish, so a
+                        // DropNewest subscriber drops the NEWEST replayed events under a full buffer
+                        // (keeping the oldest that fit) exactly as it would for live events, rather
+                        // than letting the channel's native full-mode rewrite the buffered backlog.
+                        // The Wait policy degrades to a single non-blocking attempt here on purpose:
+                        // back-pressure is a live-publish concern and we must not block under the gate
+                        // while attaching a subscriber. A full buffer simply refuses the replayed
+                        // entry, which is acceptable for backlog catch-up.
+                        TryEnqueue(subscriber, entry.Event);
                     }
                 }
             }
@@ -406,16 +411,39 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
 
         private DeliveryOutcome Deliver(Subscriber subscriber, ServerSentEvent delivery)
         {
+            // The Wait policy is the only one that can apply back-pressure, and only on live publish.
+            // Every other case (and the first non-blocking attempt of Wait) is the shared enqueue used
+            // by both live publish and replay, so a subscriber's full-buffer policy is honored
+            // identically on both paths.
+            if (fullBufferPolicy == FullBufferPolicy.Wait)
+            {
+                var writer = subscriber.Channel.Writer;
+                var wasFull = subscriber.Channel.Reader.Count >= subscriberCapacity;
+                return DeliverWaiting(writer, delivery, wasFull);
+            }
+
+            return TryEnqueue(subscriber, delivery);
+        }
+
+        /// <summary>
+        /// Enqueue one event honoring the configured drop policy, without ever blocking. Shared by
+        /// live publish and backlog replay so both apply the SAME full-buffer behavior. For the Wait
+        /// policy this performs a single non-blocking attempt (the bounded wait lives only in the live
+        /// publish path); for the drop policies it reproduces their semantics exactly:
+        /// DropNewest refuses the incoming event when full (keeping the oldest that fit), DropOldest
+        /// admits it and evicts the oldest buffered event.
+        /// </summary>
+        private DeliveryOutcome TryEnqueue(Subscriber subscriber, ServerSentEvent delivery)
+        {
             var writer = subscriber.Channel.Writer;
-            var reader = subscriber.Channel.Reader;
-            var wasFull = reader.Count >= subscriberCapacity;
+            var wasFull = subscriber.Channel.Reader.Count >= subscriberCapacity;
 
             switch (fullBufferPolicy)
             {
                 case FullBufferPolicy.DropNewest:
-                    // The channel is in DropNewest mode: TryWrite on a full buffer succeeds (the write
-                    // is accepted) but the newest item is discarded, so it counts as a drop. When the
-                    // buffer had room the event is genuinely buffered and delivered.
+                    // DropNewest: a full buffer discards the incoming (newest) event rather than
+                    // letting the channel's native full-mode evict a buffered entry. When the buffer
+                    // had room the event is genuinely buffered and delivered.
                     if (wasFull)
                     {
                         return new DeliveryOutcome(Delivered: false, Dropped: true, WasFull: true);
@@ -423,10 +451,8 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
                     writer.TryWrite(delivery);
                     return new DeliveryOutcome(Delivered: true, Dropped: false, WasFull: false);
 
-                case FullBufferPolicy.Wait:
-                    return DeliverWaiting(writer, delivery, wasFull);
-
-                default: // DropOldest: TryWrite always succeeds; a full buffer evicts its oldest event.
+                default: // DropOldest (and the non-blocking attempt for Wait): TryWrite always
+                         // succeeds; a full buffer evicts its oldest event.
                     var delivered = writer.TryWrite(delivery);
                     return new DeliveryOutcome(Delivered: delivered, Dropped: wasFull, WasFull: wasFull);
             }

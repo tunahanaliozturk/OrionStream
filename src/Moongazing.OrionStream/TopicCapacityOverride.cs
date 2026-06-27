@@ -22,17 +22,23 @@ public sealed class TopicCapacityOverride
 
     internal void Validate(string topic)
     {
+        // CA2208 wants paramName to name one of this method's parameters, but the genuinely invalid
+        // argument is the override property the caller set on this instance, not the topic key. Naming
+        // the property is what makes the thrown ParamName actionable for the caller, so the rule is
+        // suppressed for these two throws only.
+#pragma warning disable CA2208 // Instantiate argument exceptions correctly
         if (SubscriberCapacity is { } sub && sub < 1)
         {
             throw new ArgumentOutOfRangeException(
-                nameof(topic), sub,
+                nameof(SubscriberCapacity), sub,
                 $"SubscriberCapacity override for topic '{topic}' must be at least 1.");
         }
         if (ReplayBufferCapacity is { } replay && replay < 0)
         {
             throw new ArgumentOutOfRangeException(
-                nameof(topic), replay,
+                nameof(ReplayBufferCapacity), replay,
                 $"ReplayBufferCapacity override for topic '{topic}' must be zero or greater.");
         }
+#pragma warning restore CA2208 // Instantiate argument exceptions correctly
     }
 }

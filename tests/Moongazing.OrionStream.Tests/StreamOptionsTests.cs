@@ -154,7 +154,9 @@ public sealed class StreamOptionsTests
         var options = new StreamOptions();
         options.ConfigureTopic("busy", o => o.SubscriberCapacity = 0);
 
-        Assert.Throws<ArgumentOutOfRangeException>(options.Validate);
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(options.Validate);
+        // The invalid argument is the override's SubscriberCapacity, not the topic name.
+        Assert.Equal(nameof(TopicCapacityOverride.SubscriberCapacity), ex.ParamName);
     }
 
     [Fact]
@@ -163,7 +165,9 @@ public sealed class StreamOptionsTests
         var options = new StreamOptions();
         options.ConfigureTopic("busy", o => o.ReplayBufferCapacity = -1);
 
-        Assert.Throws<ArgumentOutOfRangeException>(options.Validate);
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(options.Validate);
+        // The invalid argument is the override's ReplayBufferCapacity, not the topic name.
+        Assert.Equal(nameof(TopicCapacityOverride.ReplayBufferCapacity), ex.ParamName);
     }
 
     [Fact]
