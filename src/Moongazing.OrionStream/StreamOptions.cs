@@ -1,11 +1,21 @@
 namespace Moongazing.OrionStream;
 
+using System.Text.Json;
+
 /// <summary>
 /// Configuration for the broadcast hub and the SSE writer: how much each subscriber may buffer
 /// and how often a heartbeat is sent on an idle connection.
 /// </summary>
 public sealed class StreamOptions
 {
+    /// <summary>
+    /// The serializer used by the typed publish helpers to render a payload to the SSE
+    /// <c>data:</c> field. Defaults to <see cref="JsonSerializerDefaults.Web"/> options. Replace it to
+    /// control naming, casing, or converters; the typed publish helpers also accept a per-call
+    /// override.
+    /// </summary>
+    public JsonSerializerOptions SerializerOptions { get; set; } = new(JsonSerializerDefaults.Web);
+
     /// <summary>
     /// The bounded buffer size per subscriber. When a subscriber falls this far behind, the
     /// oldest buffered event is dropped to make room for the newest. Default 256.

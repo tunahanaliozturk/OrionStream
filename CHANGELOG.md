@@ -6,6 +6,46 @@ All notable changes to OrionStream are documented in this file. The format is ba
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-27
+
+### Added
+
+Core ergonomics and observability. All additive; the existing hub, resume, replay, and wire path are
+unchanged.
+
+- `MapServerSentEvents` endpoint helper (`Moongazing.OrionStream.AspNetCore`): a minimal-API
+  extension over `IEndpointRouteBuilder` that wires an SSE endpoint to the hub in one line. It reads
+  the `Last-Event-ID` request header, subscribes (resuming when the header is present), and streams
+  the subscription to the response with the correct SSE headers, heartbeats, and cancellation on
+  client disconnect. Overloads take a fixed topic or a per-request topic selector (for example off a
+  route value); an empty selected topic is a `400`.
+- Typed publish: `ISseHub.Publish<T>(topic, payload, ...)` serializes a payload to the `data:` field
+  with `System.Text.Json` (web defaults, or a supplied `JsonSerializerOptions`), with optional
+  `event:`, `id:`, and `retry:`. The raw string publish is unchanged and remains the primitive.
+- Async-enumerable sugar: `StreamSubscription.ReadAllAsync()` and `ReadAllAsync<T>()` expose a
+  subscription as an `IAsyncEnumerable<T>` for `await foreach`, and `ISseHub.PublishAllAsync<T>` drains
+  an `IAsyncEnumerable<T>` into a topic. Each completes on cancellation.
+- `StreamOptions.SerializerOptions`: the default `JsonSerializerOptions` (web defaults) for the typed
+  publish helpers.
+
+### Observability
+
+- The `orionstream.published` and `orionstream.dropped` counters now carry an `orionstream.topic` tag
+  (`StreamDiagnostics.TopicTagName`) so they can be sliced per topic. Drops are recorded once per
+  publish with the topic, rather than one untagged add per evicting subscriber.
+- `StreamDiagnostics` exposes an `ActivitySource` named `Moongazing.OrionStream` carrying an
+  `OrionStream.Publish` (producer) span and an `OrionStream.Subscribe` (consumer) span, each tagged
+  with the topic; the publish span also tags the delivered subscriber count. Mirrors the existing
+  meter for distributed-tracing consumers.
+
+### Tests
+
+20 new tests: the endpoint helper serves an SSE stream with the right headers and resumes from
+`Last-Event-ID`; typed publish round-trips through the serializer and honors a supplied options
+instance; the async-enumerable helpers yield in order and complete on cancellation; and the per-topic
+metric tags and publish/subscribe activities are asserted via a `MeterListener` and an
+`ActivityListener`.
+
 ## [0.2.1] - 2026-06-20
 
 ### Performance
@@ -66,5 +106,7 @@ Initial release. Server-Sent Events for ASP.NET Core.
 16 tests across the formatter, the hub (fan-out, topic isolation, unsubscribe, drop-oldest,
 double-dispose), the response writer, and registration.
 
+[0.3.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.3.0
+[0.2.1]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.2.1
 [0.2.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.1.0

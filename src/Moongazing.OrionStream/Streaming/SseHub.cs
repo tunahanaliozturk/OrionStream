@@ -68,13 +68,16 @@ public sealed class SseHub : ISseHub
         // live channel we just registered, and so a concurrent topic removal cannot drop the topic
         // we are attaching to. That ordering is what prevents a missed, duplicated, or orphaned
         // event.
-        lock (lifecycle)
+        using (diagnostics.StartSubscribe(topic))
         {
-            var topicState = topics.GetOrAdd(topic, t => new Topic(t, options.ReplayBufferCapacity));
-            topicState.AddSubscriber(id, channel, lastEventId);
-        }
+            lock (lifecycle)
+            {
+                var topicState = topics.GetOrAdd(topic, t => new Topic(t, options.ReplayBufferCapacity));
+                topicState.AddSubscriber(id, channel, lastEventId);
+            }
 
-        diagnostics.IncrementSubscribers();
+            diagnostics.IncrementSubscribers();
+        }
 
         return new StreamSubscription(topic, channel.Reader, () => Unsubscribe(topic, id, channel));
     }
@@ -85,7 +88,9 @@ public sealed class SseHub : ISseHub
         ArgumentException.ThrowIfNullOrEmpty(topic);
         ArgumentNullException.ThrowIfNull(evt);
 
-        diagnostics.Published.Add(1);
+        using var activity = diagnostics.StartPublish(topic);
+
+        diagnostics.RecordPublished(topic);
 
         Topic? topicState;
         if (options.ReplayBufferCapacity > 0)
@@ -105,7 +110,9 @@ public sealed class SseHub : ISseHub
             return 0;
         }
 
-        return topicState.Publish(evt, options.SubscriberCapacity, diagnostics);
+        var delivered = topicState.Publish(evt, options.SubscriberCapacity, diagnostics);
+        activity?.SetTag("orionstream.delivered", delivered);
+        return delivered;
     }
 
     /// <inheritdoc />
@@ -261,19 +268,24 @@ public sealed class SseHub : ISseHub
                 }
 
                 var delivered = 0;
+                var dropped = 0L;
                 foreach (var channel in subscribers.Values)
                 {
                     // DropOldest means TryWrite always succeeds; count a drop when the buffer was
                     // already full so the oldest event is being evicted.
                     if (channel.Reader.Count >= subscriberCapacity)
                     {
-                        diagnostics.Dropped.Add(1);
+                        dropped++;
                     }
                     if (channel.Writer.TryWrite(delivery))
                     {
                         delivered++;
                     }
                 }
+
+                // Record drops once per publish, tagged with this topic, rather than one counter add
+                // per evicting subscriber: the count is the same and the per-publish call is cheaper.
+                diagnostics.RecordDropped(Name, dropped);
 
                 return delivered;
             }

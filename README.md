@@ -81,19 +81,21 @@ builder.Services.AddOrionStream(o =>
 });
 ```
 
-Map an endpoint that streams a topic to the client:
+Map an endpoint that streams a topic to the client. The `MapServerSentEvents` helper wires the
+subscribe-then-write pattern (including reading `Last-Event-ID` to resume) in one line:
 
 ```csharp
-app.MapGet("/events/orders", async (HttpContext ctx, ISseHub hub, StreamOptions options) =>
-{
-    using var subscription = hub.Subscribe("orders");
-    await ctx.Response.WriteStreamAsync(subscription, options.HeartbeatInterval, ctx.RequestAborted);
-});
+app.MapServerSentEvents("/events/orders", "orders");
+// or derive the topic per request from a route value:
+app.MapServerSentEvents("/events/{topic}", ctx => (string?)ctx.Request.RouteValues["topic"]);
 ```
 
-Publish from anywhere that has the hub:
+Publish from anywhere that has the hub. The typed overload serializes the payload for you:
 
 ```csharp
+hub.Publish("orders", order, eventName: "order.created", id: order.Id.ToString());
+
+// or build the event yourself with the raw string publish:
 hub.Publish("orders", new ServerSentEvent
 {
     Id = order.Id.ToString(),
@@ -274,13 +276,18 @@ after the call: `StreamOptions`, `StreamDiagnostics`, and `ISseHub` (implemented
 
 | Instrument | Kind | Unit | Meaning |
 | --- | --- | --- | --- |
-| `orionstream.published` | Counter | `{event}` | Events published to the hub, counted once per publish (not per subscriber). |
-| `orionstream.dropped` | Counter | `{event}` | Events dropped because a subscriber buffer was full at publish time. |
+| `orionstream.published` | Counter | `{event}` | Events published to the hub, counted once per publish (not per subscriber). Tagged with `orionstream.topic`. |
+| `orionstream.dropped` | Counter | `{event}` | Events dropped because a subscriber buffer was full at publish time. Tagged with `orionstream.topic`. |
 | `orionstream.subscribers` | Observable gauge | `{subscriber}` | Currently connected subscribers across all topics. |
+
+The `orionstream.topic` tag (`StreamDiagnostics.TopicTagName`) slices the published and dropped
+counters per topic. `StreamDiagnostics` also exposes an `ActivitySource` named `Moongazing.OrionStream`
+with an `OrionStream.Publish` span and an `OrionStream.Subscribe` span, each tagged with the topic.
 
 ```csharp
 builder.Services.AddOpenTelemetry()
-    .WithMetrics(m => m.AddMeter(StreamDiagnostics.MeterName));
+    .WithMetrics(m => m.AddMeter(StreamDiagnostics.MeterName))
+    .WithTracing(t => t.AddSource(StreamDiagnostics.MeterName));
 ```
 
 A steadily climbing `orionstream.dropped` is the signal that subscribers cannot keep up: raise
