@@ -24,7 +24,7 @@ using Moongazing.OrionStream.Diagnostics;
 /// resume just like hub sequences. See <see cref="Subscribe(string, string?)"/> for the resume
 /// policy.
 /// </remarks>
-public sealed class SseHub : ISseHub
+public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
 {
     private readonly ConcurrentDictionary<string, Topic> topics = new(StringComparer.Ordinal);
 
@@ -45,6 +45,9 @@ public sealed class SseHub : ISseHub
         this.options = options;
         this.diagnostics = diagnostics;
     }
+
+    /// <inheritdoc />
+    System.Text.Json.JsonSerializerOptions IStreamSerializerOptionsProvider.SerializerOptions => options.SerializerOptions;
 
     /// <inheritdoc />
     public StreamSubscription Subscribe(string topic) => Subscribe(topic, lastEventId: null);

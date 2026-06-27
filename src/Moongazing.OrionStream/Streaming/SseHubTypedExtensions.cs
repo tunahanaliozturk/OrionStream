@@ -10,8 +10,6 @@ using System.Text.Json;
 /// </summary>
 public static class SseHubTypedExtensions
 {
-    private static readonly JsonSerializerOptions DefaultSerializerOptions = new(JsonSerializerDefaults.Web);
-
     /// <summary>
     /// Serialize <paramref name="payload"/> to JSON and publish it as the <c>data:</c> of a new event.
     /// </summary>
@@ -20,7 +18,9 @@ public static class SseHubTypedExtensions
     /// <param name="topic">The topic to publish to.</param>
     /// <param name="payload">The payload to serialize into the event data.</param>
     /// <param name="serializerOptions">
-    /// The serializer options, or null to use <see cref="JsonSerializerDefaults.Web"/> defaults.
+    /// The serializer options, or null to use the hub's configured
+    /// <see cref="StreamOptions.SerializerOptions"/> (falling back to
+    /// <see cref="JsonSerializerDefaults.Web"/> defaults only when the hub exposes none).
     /// </param>
     /// <param name="eventName">The optional SSE <c>event:</c> name.</param>
     /// <param name="id">The optional producer-supplied SSE <c>id:</c>.</param>
@@ -37,7 +37,8 @@ public static class SseHubTypedExtensions
     {
         ArgumentNullException.ThrowIfNull(hub);
 
-        var data = JsonSerializer.Serialize(payload, serializerOptions ?? DefaultSerializerOptions);
+        var serializer = StreamSerializerOptionsResolver.Resolve(hub, serializerOptions);
+        var data = JsonSerializer.Serialize(payload, serializer);
         var evt = new ServerSentEvent
         {
             Data = data,

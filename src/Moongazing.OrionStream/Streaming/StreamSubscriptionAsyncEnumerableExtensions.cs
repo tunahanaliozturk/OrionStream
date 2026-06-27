@@ -70,7 +70,9 @@ public static class StreamSubscriptionAsyncEnumerableExtensions
     /// <param name="topic">The topic to publish to.</param>
     /// <param name="source">The async stream of items to publish.</param>
     /// <param name="serializerOptions">
-    /// The serializer options, or null to use <see cref="JsonSerializerDefaults.Web"/> defaults.
+    /// The serializer options, or null to use the hub's configured
+    /// <see cref="StreamOptions.SerializerOptions"/> (falling back to
+    /// <see cref="JsonSerializerDefaults.Web"/> defaults only when the hub exposes none).
     /// </param>
     /// <param name="eventName">The optional SSE <c>event:</c> name applied to every published item.</param>
     /// <param name="cancellationToken">Stops draining the source when tripped.</param>
@@ -86,7 +88,10 @@ public static class StreamSubscriptionAsyncEnumerableExtensions
         ArgumentNullException.ThrowIfNull(hub);
         ArgumentNullException.ThrowIfNull(source);
 
-        var serializer = serializerOptions ?? DefaultSerializerOptions;
+        // Resolve once: an explicit override wins, else the hub's configured options, else the web
+        // default. The resolved instance is passed to each per-item publish as a non-null override so
+        // every item serializes with exactly these options and the resolution is not repeated per item.
+        var serializer = StreamSerializerOptionsResolver.Resolve(hub, serializerOptions);
         var published = 0L;
         await foreach (var item in source.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
