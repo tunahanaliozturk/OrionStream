@@ -27,8 +27,8 @@ public sealed class StreamDiagnostics : IDisposable
     /// <summary>Create the meter, its instruments, and the activity source.</summary>
     public StreamDiagnostics()
     {
-        meter = new Meter(MeterName, "0.3.0");
-        activitySource = new ActivitySource(MeterName, "0.3.0");
+        meter = new Meter(MeterName, "0.4.0");
+        activitySource = new ActivitySource(MeterName, "0.4.0");
 
         Published = meter.CreateCounter<long>(
             "orionstream.published",

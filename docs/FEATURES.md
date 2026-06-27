@@ -1,6 +1,6 @@
 # OrionStream Features
 
-A reference for everything in the current public surface (0.3.0). Every item here maps to a type or
+A reference for everything in the current public surface (0.4.0). Every item here maps to a type or
 member you can call today. For ideas not yet built, see [ROADMAP.md](ROADMAP.md).
 
 ---
@@ -12,7 +12,7 @@ member you can call today. For ideas not yet built, see [ROADMAP.md](ROADMAP.md)
 3. [The event model](#3-the-event-model)
 4. [The wire-format renderer](#4-the-wire-format-renderer)
 5. [The HTTP writer](#5-the-http-writer)
-6. [Back-pressure: DropOldest](#6-back-pressure-dropoldest)
+6. [Delivery and back-pressure](#6-delivery-and-back-pressure)
 7. [Heartbeats and reconnect](#7-heartbeats-and-reconnect)
 8. [Options and validation](#8-options-and-validation)
 9. [Telemetry](#9-telemetry)
@@ -31,6 +31,7 @@ public interface ISseHub
 {
     StreamSubscription Subscribe(string topic);
     StreamSubscription Subscribe(string topic, string? lastEventId);
+    StreamSubscription Subscribe(string topic, string? lastEventId, Func<ServerSentEvent, bool>? filter);
     int Publish(string topic, ServerSentEvent evt);
     int SubscriberCount(string topic);
 }
@@ -39,6 +40,9 @@ public interface ISseHub
 - `Subscribe(topic)` registers a subscriber and returns a `StreamSubscription`.
 - `Subscribe(topic, lastEventId)` registers a subscriber that resumes after a client-supplied
   `Last-Event-ID`, replaying the retained backlog after that id (see resume below).
+- `Subscribe(topic, lastEventId, filter)` adds an optional predicate evaluated before the event
+  enters the subscriber's buffer, so the subscriber receives only matching events (see
+  [section 6](#6-delivery-and-back-pressure)).
 - `Publish(topic, evt)` delivers to every current subscriber and returns how many it reached.
   Publishing to a topic with no subscribers returns `0`.
 - `SubscriberCount(topic)` returns the current subscriber count for a topic.
@@ -189,18 +193,44 @@ the source completes or cancellation trips.
 
 ---
 
-## 6. Back-pressure: DropOldest
+## 6. Delivery and back-pressure
 
-Every subscriber gets its own bounded channel created with `BoundedChannelFullMode.DropOldest` and
-capacity `SubscriberCapacity`. The effects:
+Every subscriber gets its own bounded channel of capacity `SubscriberCapacity` (or the per-topic
+override, below). What happens when that buffer is full at publish time is set by
+`StreamOptions.FullBufferPolicy`:
 
-- `Publish` never blocks on a slow subscriber.
-- A slow subscriber affects only its own stream, never the producer or other subscribers.
-- When a subscriber's buffer is full at publish time, its oldest buffered event is evicted to admit
-  the newest, and the eviction is recorded as `orionstream.dropped`.
+| Policy | Full-buffer behavior | Blocks publisher? |
+| --- | --- | --- |
+| `DropOldest` (default) | Evict the oldest buffered event to admit the newest. | No |
+| `DropNewest` | Keep the buffered events; discard the incoming one. | No |
+| `Wait` | Wait for room up to `MaxPublishWait`, then give up on that subscriber. | Yes, up to the cap |
+
+- A slow subscriber under either drop policy affects only its own stream, never the producer or other
+  subscribers, and the loss is recorded as `orionstream.dropped`.
+- `Wait` is the only policy that applies back-pressure to the publisher. It requires an explicit
+  `MaxPublishWait` cap (validated at registration) so a wedged reader cannot stall `Publish` forever:
+  the call returns the instant room appears, or after the cap drops the event for that subscriber and
+  proceeds. Choose it only when slowing the producer is preferable to losing events.
 
 This trades guaranteed per-client delivery for keeping every stream live and current. Use
 `ServerSentEvent.Id` with a server-side replay source if a client must recover missed events.
+
+**Slow-consumer disconnect.** With `StreamOptions.SlowConsumerPolicy` set, a subscriber whose buffer
+is full on `MaxConsecutiveFullPublishes` publishes in a row is disconnected (its channel completed,
+like a client disconnect) rather than fed a permanently lossy stream. A single publish that finds room
+resets the run, so a subscriber that briefly saturates and catches up is never disconnected. The
+threshold is counted in publishes, not wall-clock time. Disabled by default.
+
+**Per-topic capacity overrides.** `StreamOptions.ConfigureTopic(topic, o => ...)` raises or lowers the
+`SubscriberCapacity` and/or `ReplayBufferCapacity` for one topic without changing the global default
+for every other topic, so a busy topic can carry a larger buffer on its own.
+
+**Per-subscriber filtering.** `ISseHub.Subscribe(topic, lastEventId, filter)` takes an optional
+predicate. It runs once per publish for that subscriber, *before* the event enters the buffer, so a
+chatty topic does not fill a client's buffer with events it would discard, and a filtered-out event
+never counts as delivered or dropped for that subscriber. The filter also applies to replayed backlog
+on resume. A null filter delivers every event. Keep the predicate cheap; it runs inside the publish
+path and must not throw.
 
 ---
 
@@ -221,15 +251,25 @@ This trades guaranteed per-client delivery for keeping every stream live and cur
 public sealed class StreamOptions
 {
     public int SubscriberCapacity { get; set; } = 256;
+    public FullBufferPolicy FullBufferPolicy { get; set; } = FullBufferPolicy.DropOldest;
+    public TimeSpan? MaxPublishWait { get; set; }
+    public SlowConsumerPolicy? SlowConsumerPolicy { get; set; }
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(15);
     public int ReplayBufferCapacity { get; set; } = 256;
     public JsonSerializerOptions SerializerOptions { get; set; } = new(JsonSerializerDefaults.Web);
+    public StreamOptions ConfigureTopic(string topic, Action<TopicCapacityOverride> configure);
 }
 ```
 
 - `SubscriberCapacity` must be at least `1`.
+- `FullBufferPolicy` defaults to `DropOldest`; see [section 6](#6-delivery-and-back-pressure).
+- `MaxPublishWait` is required and must be positive when `FullBufferPolicy` is `Wait`; it is the cap
+  on how long a slow subscriber can stall a publish.
+- `SlowConsumerPolicy.MaxConsecutiveFullPublishes` must be at least `1`. Null disables the policy.
 - `HeartbeatInterval` must be positive.
 - `ReplayBufferCapacity` must be zero or greater; `0` disables `Last-Event-ID` replay.
+- `ConfigureTopic` overrides per topic: each override's `SubscriberCapacity` (if set) must be at least
+  `1` and `ReplayBufferCapacity` (if set) zero or greater.
 - `SerializerOptions` is the default serializer for the typed publish helpers (web defaults).
 
 Options are validated eagerly when you call `AddOrionStream`, so a bad value throws at registration

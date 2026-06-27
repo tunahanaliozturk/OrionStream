@@ -42,8 +42,32 @@ public interface ISseHub
     StreamSubscription Subscribe(string topic, string? lastEventId);
 
     /// <summary>
-    /// Publish an event to every current subscriber of a topic. Never blocks on a slow subscriber:
-    /// when a subscriber buffer is full the oldest event in it is dropped to admit the newest.
+    /// Subscribe to a topic with an optional <paramref name="filter"/> and optional resume. The
+    /// filter is evaluated once per publish for this subscriber, before the event enters the
+    /// subscriber's buffer, so events the filter rejects never consume buffer space.
+    /// </summary>
+    /// <remarks>
+    /// The filter is evaluated against the per-delivery event the wire would carry (id stamped),
+    /// before the buffer admits it, so a chatty topic does not fill a slow client's buffer with events
+    /// it would discard. A null filter accepts every event, matching the unfiltered overloads. The
+    /// filter also applies to replayed events on resume: only matching backlog entries are replayed.
+    /// Resume semantics are otherwise identical to <see cref="Subscribe(string, string?)"/>. The
+    /// filter should be cheap and must not throw; it runs inside the publish path.
+    /// </remarks>
+    /// <param name="topic">The topic to subscribe to.</param>
+    /// <param name="lastEventId">The client's last seen event id, or null to start from now.</param>
+    /// <param name="filter">
+    /// A predicate run per event; only events for which it returns true are delivered to this
+    /// subscriber. Null delivers every event.
+    /// </param>
+    StreamSubscription Subscribe(string topic, string? lastEventId, Func<ServerSentEvent, bool>? filter);
+
+    /// <summary>
+    /// Publish an event to every current subscriber of a topic. By default never blocks on a slow
+    /// subscriber: when a subscriber buffer is full the oldest event in it is dropped to admit the
+    /// newest. A non-default <see cref="StreamOptions.FullBufferPolicy"/> can change that to dropping
+    /// the newest or, for <see cref="FullBufferPolicy.Wait"/>, waiting up to
+    /// <see cref="StreamOptions.MaxPublishWait"/> (which can apply back-pressure to this call).
     /// </summary>
     /// <param name="topic">The topic to publish to.</param>
     /// <param name="evt">The event to publish.</param>
