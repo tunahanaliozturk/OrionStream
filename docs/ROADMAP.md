@@ -1,8 +1,9 @@
 # OrionStream Roadmap
 
-OrionStream is at **0.2.1**: an in-process Server-Sent Events hub for ASP.NET Core, with topic
-fan-out, `Last-Event-ID` resume from a bounded per-topic replay buffer, and an allocation-light wire
-writer.
+OrionStream is at **0.3.0**: an in-process Server-Sent Events hub for ASP.NET Core, with topic
+fan-out, `Last-Event-ID` resume from a bounded per-topic replay buffer, an allocation-light wire
+writer, a one-line endpoint mapping helper, typed and async-enumerable publish/consume sugar, and
+per-topic metric tags plus a publish/subscribe `ActivitySource`.
 
 This is a list of ideas under consideration, not a schedule and not a set of promises. Items here
 may ship, change shape, or be dropped. The goal is to be honest about what the library does today
@@ -48,6 +49,20 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
   and `WriteStreamAsync` encodes into a pooled `ArrayPool<byte>` buffer rather than a fresh `byte[]`
   per write. Wire output is byte-identical to before; measured per-event allocation dropped by
   roughly a quarter to just under a half depending on event shape.
+- **Endpoint mapping helper (0.3.0).** `MapServerSentEvents` over `IEndpointRouteBuilder` wires an
+  SSE endpoint to the hub in one line: it reads `Last-Event-ID`, subscribes (resuming when present),
+  and streams the subscription with the correct headers, heartbeats, and disconnect cancellation.
+  Overloads take a fixed topic or a per-request topic selector.
+- **Typed publish (0.3.0).** `ISseHub.Publish<T>` serializes a payload to the `data:` field with
+  `System.Text.Json` (web defaults or a supplied `JsonSerializerOptions`), alongside the unchanged
+  raw string publish.
+- **Async-enumerable sugar (0.3.0).** `StreamSubscription.ReadAllAsync()` / `ReadAllAsync<T>()` expose
+  a subscription as `IAsyncEnumerable<T>` for `await foreach`, and `ISseHub.PublishAllAsync<T>` drains
+  an async stream into a topic.
+- **Per-topic metric tags and a tracing `ActivitySource` (0.3.0).** `orionstream.published` and
+  `orionstream.dropped` now carry an `orionstream.topic` tag, and `StreamDiagnostics` exposes an
+  `ActivitySource` named `Moongazing.OrionStream` with `OrionStream.Publish` and
+  `OrionStream.Subscribe` spans tagged with the topic.
 
 ---
 
@@ -55,16 +70,6 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
 
 These are possibilities, ordered loosely by how aligned they are with the library's purpose. None is
 committed, and the version tags are targets.
-
-### Ergonomics (targeting 0.3.0, ~Q3 2026)
-
-- **An endpoint mapping helper.** A `MapServerSentEvents("/events/{topic}")` style extension that
-  wraps the subscribe-then-write pattern (including reading `Last-Event-ID` off the request), so the
-  common case is one line instead of a handler body.
-- **A typed publish overload.** A helper that serializes a payload to `Data` with a supplied
-  `JsonSerializerOptions`, to remove the manual `JsonSerializer.Serialize` call at publish sites.
-- **Async enumeration sugar.** A small extension over `StreamSubscription.Reader` for consumers that
-  prefer `await foreach` over manual `TryRead` loops outside the HTTP writer.
 
 ### Delivery and back-pressure (targeting 0.4.0, ~Q4 2026)
 
@@ -114,16 +119,11 @@ committed, and the version tags are targets.
 - **Backpressure-aware write timeouts.** A guard so a wedged client connection cannot hold a writer
   loop open indefinitely beyond cancellation.
 
-### Observability (targeting 0.3.0, ~Q3 2026)
+### Observability (targeting 0.4.0, ~Q4 2026)
 
-- **Tags on the metrics.** Emitting the topic (and possibly a drop reason) as a metric tag so
-  `orionstream.published` and `orionstream.dropped` can be sliced per topic, balanced against
-  cardinality risk on deployments with many topics.
 - **Resume and replay metrics.** Counters for resume attempts split by outcome (exact resume versus
   from-now fallback) and for replayed events, so operators can see how often clients reconnect with a
   usable `Last-Event-ID` and size `ReplayBufferCapacity` from data rather than guesswork.
-- **An `ActivitySource` for tracing.** A span around publish/subscribe for distributed-tracing
-  consumers, mirroring the existing meter.
 
 ---
 

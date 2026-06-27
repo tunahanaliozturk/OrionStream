@@ -1,6 +1,6 @@
 # OrionStream Features
 
-A reference for everything in the current public surface (0.1.0). Every item here maps to a type or
+A reference for everything in the current public surface (0.3.0). Every item here maps to a type or
 member you can call today. For ideas not yet built, see [ROADMAP.md](ROADMAP.md).
 
 ---
@@ -30,15 +30,23 @@ publish once to a topic and every current subscriber of that topic receives the 
 public interface ISseHub
 {
     StreamSubscription Subscribe(string topic);
+    StreamSubscription Subscribe(string topic, string? lastEventId);
     int Publish(string topic, ServerSentEvent evt);
     int SubscriberCount(string topic);
 }
 ```
 
 - `Subscribe(topic)` registers a subscriber and returns a `StreamSubscription`.
+- `Subscribe(topic, lastEventId)` registers a subscriber that resumes after a client-supplied
+  `Last-Event-ID`, replaying the retained backlog after that id (see resume below).
 - `Publish(topic, evt)` delivers to every current subscriber and returns how many it reached.
   Publishing to a topic with no subscribers returns `0`.
 - `SubscriberCount(topic)` returns the current subscriber count for a topic.
+
+The extension `Publish<T>(topic, payload, ...)` (in `SseHubTypedExtensions`) serializes a payload to
+the `data:` field with `System.Text.Json` so a publish site does not call `JsonSerializer.Serialize`
+by hand. It accepts an optional `JsonSerializerOptions` (web defaults otherwise) and optional
+`eventName`, `id`, and `retryMilliseconds`.
 
 Topics are matched ordinally (case-sensitive). A topic is created lazily on first subscribe and
 removed once its last subscriber leaves, so idle topics do not accumulate. `Subscribe` and `Publish`
@@ -140,6 +148,45 @@ comment. The call returns when `cancellationToken` trips (client disconnect, typ
 `HttpContext.RequestAborted`) or the subscription completes. Cancellation is the expected exit and is
 swallowed.
 
+### The endpoint mapping helper
+
+`SseEndpointRouteBuilderExtensions.MapServerSentEvents` wraps the subscribe-then-write pattern into a
+single minimal-API mapping, so the common case is one line instead of a handler body.
+
+```csharp
+public static IEndpointConventionBuilder MapServerSentEvents(
+    this IEndpointRouteBuilder endpoints, string pattern, string topic);
+
+public static IEndpointConventionBuilder MapServerSentEvents(
+    this IEndpointRouteBuilder endpoints, string pattern, Func<HttpContext, string?> topicSelector);
+```
+
+The mapped GET endpoint reads the `Last-Event-ID` request header, calls `Subscribe(topic, lastEventId)`
+(so it resumes when the header is present), and streams the subscription via `WriteStreamAsync` with
+the hub's configured `HeartbeatInterval` and `HttpContext.RequestAborted`. The first overload binds a
+fixed topic; the second derives the topic per request, for example off a route value. A null or empty
+selected topic responds `400 Bad Request`.
+
+```csharp
+app.MapServerSentEvents("/events/orders", "orders");
+app.MapServerSentEvents("/events/{topic}", ctx => (string?)ctx.Request.RouteValues["topic"]);
+```
+
+### Async-enumerable sugar
+
+For consumers outside the HTTP writer, `StreamSubscriptionAsyncEnumerableExtensions` exposes a
+subscription as an async stream and drains an async stream into a topic.
+
+```csharp
+IAsyncEnumerable<ServerSentEvent> ReadAllAsync(this StreamSubscription s, CancellationToken ct = default);
+IAsyncEnumerable<T?> ReadAllAsync<T>(this StreamSubscription s, JsonSerializerOptions? o = null, CancellationToken ct = default);
+Task<long> PublishAllAsync<T>(this ISseHub hub, string topic, IAsyncEnumerable<T> source, ...);
+```
+
+`ReadAllAsync` is a thin view over `StreamSubscription.Reader`; the typed overload deserializes each
+event's `data:` from JSON. `PublishAllAsync` publishes one event per source item. Each completes when
+the source completes or cancellation trips.
+
 ---
 
 ## 6. Back-pressure: DropOldest
@@ -175,11 +222,15 @@ public sealed class StreamOptions
 {
     public int SubscriberCapacity { get; set; } = 256;
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(15);
+    public int ReplayBufferCapacity { get; set; } = 256;
+    public JsonSerializerOptions SerializerOptions { get; set; } = new(JsonSerializerDefaults.Web);
 }
 ```
 
 - `SubscriberCapacity` must be at least `1`.
 - `HeartbeatInterval` must be positive.
+- `ReplayBufferCapacity` must be zero or greater; `0` disables `Last-Event-ID` replay.
+- `SerializerOptions` is the default serializer for the typed publish helpers (web defaults).
 
 Options are validated eagerly when you call `AddOrionStream`, so a bad value throws at registration
 rather than at first use.
@@ -188,17 +239,23 @@ rather than at first use.
 
 ## 9. Telemetry
 
-`StreamDiagnostics` owns a `System.Diagnostics.Metrics.Meter` named `Moongazing.OrionStream`
-(`StreamDiagnostics.MeterName`).
+`StreamDiagnostics` owns a `System.Diagnostics.Metrics.Meter` and an
+`System.Diagnostics.ActivitySource`, both named `Moongazing.OrionStream` (`StreamDiagnostics.MeterName`).
 
 | Instrument | Kind | Unit | Meaning |
 | --- | --- | --- | --- |
-| `orionstream.published` | Counter | `{event}` | Events published, counted once per publish. |
-| `orionstream.dropped` | Counter | `{event}` | Events dropped on a full subscriber buffer. |
+| `orionstream.published` | Counter | `{event}` | Events published, counted once per publish. Tagged with `orionstream.topic`. |
+| `orionstream.dropped` | Counter | `{event}` | Events dropped on a full subscriber buffer. Tagged with `orionstream.topic`. |
 | `orionstream.subscribers` | Observable gauge | `{subscriber}` | Currently connected subscribers across all topics. |
 
-`StreamDiagnostics` is `IDisposable`; disposing it disposes the meter. Wire it into OpenTelemetry
-with `AddMeter(StreamDiagnostics.MeterName)`.
+The `orionstream.topic` tag (`StreamDiagnostics.TopicTagName`) lets the published and dropped counters
+be sliced per topic. The `ActivitySource` carries an `OrionStream.Publish` (producer) span and an
+`OrionStream.Subscribe` (consumer) span, each tagged with the topic; the publish span also tags the
+delivered subscriber count.
+
+`StreamDiagnostics` is `IDisposable`; disposing it disposes the meter and the activity source. Wire it
+into OpenTelemetry with `AddMeter(StreamDiagnostics.MeterName)` and
+`AddSource(StreamDiagnostics.MeterName)`.
 
 ---
 
