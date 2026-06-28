@@ -234,6 +234,20 @@ Set `ReplayBufferCapacity` to `0` to disable replay entirely; every subscribe th
 Sizing the buffer is the usual trade-off: it bounds how long a client can be disconnected and still
 resume without a gap, against the memory held per active topic.
 
+How the wire id is chosen is a stated contract on `ISseHub`, not an implementation detail: the hub
+sequence is per topic, strictly increasing by one with no gaps starting at 1; a producer id always
+wins on the wire while the sequence is still assigned underneath; delivery and retention are in
+ascending-sequence (publish) order; and when producer ids and hub sequences mix on one topic each
+round-trips through resume by exact wire-id match, but wire ids are not globally ordered, numeric, or
+comparable across the two kinds. See [docs/FEATURES.md](docs/FEATURES.md) for the full contract.
+
+The per-topic backlog lives behind the `IReplayStore` seam, so the in-memory ring is one
+implementation and you can swap in an external store without the hub knowing where the backlog lives:
+register your own `IReplayStoreFactory` before `AddOrionStream`. `InMemoryReplayStore` is the default
+and the only one with no dependencies. A durable, cross-instance store (resume after reconnecting to a
+different instance, backlog surviving a restart) is still planned and will ship as a separate opt-in
+package behind this same seam.
+
 ### The formatter
 
 `SseFormatter` is a pure, allocation-light renderer you can use independently of the hub or the HTTP
@@ -297,8 +311,10 @@ public sealed class StreamOptions
 | `HeartbeatInterval` | `15s` | How long a stream may be idle before the writer sends a heartbeat comment. Must be positive. |
 | `ReplayBufferCapacity` | `256` | How many of the most recent events per topic are retained for `Last-Event-ID` resume. Must be zero or greater; `0` disables replay so every subscribe starts from now. |
 
-`AddOrionStream` registers three singletons via `TryAdd`, so you can override any of them before or
-after the call: `StreamOptions`, `StreamDiagnostics`, and `ISseHub` (implemented by `SseHub`).
+`AddOrionStream` registers four singletons via `TryAdd`, so you can override any of them before or
+after the call: `StreamOptions`, `StreamDiagnostics`, `IReplayStoreFactory` (default
+`InMemoryReplayStoreFactory`), and `ISseHub` (implemented by `SseHub`). Registering a custom
+`IReplayStoreFactory` first is how you swap the resume backlog store without touching the hub.
 
 ---
 

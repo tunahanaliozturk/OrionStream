@@ -39,17 +39,34 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
     private readonly object lifecycle = new();
     private readonly StreamOptions options;
     private readonly StreamDiagnostics diagnostics;
+    private readonly IReplayStoreFactory replayStoreFactory;
 
-    /// <summary>Create a hub.</summary>
+    /// <summary>Create a hub with the default in-memory replay store.</summary>
     /// <param name="options">Buffer sizing. Validated on construction.</param>
     /// <param name="diagnostics">The shared metrics instance.</param>
     public SseHub(StreamOptions options, StreamDiagnostics diagnostics)
+        : this(options, diagnostics, new InMemoryReplayStoreFactory())
+    {
+    }
+
+    /// <summary>Create a hub backed by a specific replay store factory.</summary>
+    /// <param name="options">Buffer sizing. Validated on construction.</param>
+    /// <param name="diagnostics">The shared metrics instance.</param>
+    /// <param name="replayStoreFactory">
+    /// The factory that creates the per-topic <see cref="IReplayStore"/> the hub retains and resumes a
+    /// backlog through. Pass <see cref="InMemoryReplayStoreFactory"/> (the default) for the in-process
+    /// ring, or a custom factory to swap in an external store without the hub knowing where the backlog
+    /// lives.
+    /// </param>
+    public SseHub(StreamOptions options, StreamDiagnostics diagnostics, IReplayStoreFactory replayStoreFactory)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(diagnostics);
+        ArgumentNullException.ThrowIfNull(replayStoreFactory);
         options.Validate();
         this.options = options;
         this.diagnostics = diagnostics;
+        this.replayStoreFactory = replayStoreFactory;
     }
 
     /// <inheritdoc />
@@ -174,13 +191,23 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
     /// </summary>
     internal int TopicCount => topics.Count;
 
-    private Topic CreateTopic(string topic) => new(
-        topic,
-        options.ReplayBufferCapacityFor(topic),
-        options.SubscriberCapacityFor(topic),
-        options.FullBufferPolicy,
-        options.MaxPublishWait,
-        options.SlowConsumerPolicy);
+    private Topic CreateTopic(string topic)
+    {
+        // Create the per-topic replay store only when replay is enabled for this topic, through the
+        // pluggable factory so the in-memory ring is one implementation behind the seam. A topic with
+        // replay disabled gets no store at all (null), which is what keeps the wire path allocation-light
+        // and behavior identical to before for replay-off topics.
+        var replayCapacity = options.ReplayBufferCapacityFor(topic);
+        var replayStore = replayCapacity > 0 ? replayStoreFactory.Create(topic, replayCapacity) : null;
+
+        return new Topic(
+            topic,
+            replayStore,
+            options.SubscriberCapacityFor(topic),
+            options.FullBufferPolicy,
+            options.MaxPublishWait,
+            options.SlowConsumerPolicy);
+    }
 
     private void Unsubscribe(string topic, Guid id, Channel<ServerSentEvent> channel)
     {
@@ -226,39 +253,38 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
     }
 
     /// <summary>
-    /// Per-topic state: its live subscribers, the monotonic id sequence, and a bounded replay ring
-    /// of the most recently published events. A single lock guards id assignment, the replay ring,
-    /// and the subscriber set together so publish and subscribe interleave consistently.
+    /// Per-topic state: its live subscribers, the monotonic id sequence, and the pluggable
+    /// <see cref="IReplayStore"/> that retains the most recently published events (null when replay is
+    /// disabled for this topic). A single lock guards id assignment, every store call, and the
+    /// subscriber set together so publish and subscribe interleave consistently and the store sees a
+    /// gap-free, serialized sequence.
     /// </summary>
     private sealed class Topic
     {
         private readonly object gate = new();
         private readonly ConcurrentDictionary<Guid, Subscriber> subscribers = new();
-        private readonly int replayCapacity;
+        private readonly IReplayStore? replayStore;
         private readonly int subscriberCapacity;
         private readonly FullBufferPolicy fullBufferPolicy;
         private readonly TimeSpan? maxPublishWait;
         private readonly SlowConsumerPolicy? slowConsumerPolicy;
 
-        // Ring buffer of the newest events, oldest at the front. Holds at most replayCapacity items.
-        private readonly Queue<ReplayEntry> replay;
         private long sequence;
 
         public Topic(
             string name,
-            int replayCapacity,
+            IReplayStore? replayStore,
             int subscriberCapacity,
             FullBufferPolicy fullBufferPolicy,
             TimeSpan? maxPublishWait,
             SlowConsumerPolicy? slowConsumerPolicy)
         {
             Name = name;
-            this.replayCapacity = replayCapacity;
+            this.replayStore = replayStore;
             this.subscriberCapacity = subscriberCapacity;
             this.fullBufferPolicy = fullBufferPolicy;
             this.maxPublishWait = maxPublishWait;
             this.slowConsumerPolicy = slowConsumerPolicy;
-            replay = new Queue<ReplayEntry>(replayCapacity > 0 ? replayCapacity : 0);
         }
 
         public string Name { get; }
@@ -267,14 +293,14 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
 
         public bool IsEmpty => subscribers.IsEmpty;
 
-        /// <summary>True while the replay buffer holds at least one event a reconnecting client could resume from.</summary>
+        /// <summary>True while the replay store holds at least one event a reconnecting client could resume from.</summary>
         public bool HasReplayBacklog
         {
             get
             {
                 lock (gate)
                 {
-                    return replay.Count > 0;
+                    return replayStore is { HasBacklog: true };
                 }
             }
         }
@@ -285,53 +311,90 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
             {
                 subscribers[subscriber.Id] = subscriber;
 
-                if (replayCapacity == 0 || replay.Count == 0 || string.IsNullOrEmpty(lastEventId))
+                if (replayStore is null || string.IsNullOrEmpty(lastEventId))
                 {
                     return;
                 }
 
-                // Locate the resume point by matching the client's Last-Event-ID against the EXACT
-                // value each buffered entry emitted on the wire (its WireId: the producer-supplied id
-                // if the event set one, otherwise the hub sequence). This makes resume correct whether
-                // the producer relied on the hub sequence or set its own ids: the id the browser sends
-                // back is always the id it last saw on the wire, and that is what we match here.
-                //
-                // The monotonic Sequence remains the ordering key: once the matching entry is found we
-                // replay every entry published AFTER it, in buffer order. An id that matches no
-                // retained entry (unknown / evicted / never-existed) yields no resume point, so the
-                // subscription starts from now with no replay. A subscriber filter applies to replayed
-                // events too, so only matching backlog is replayed.
-                long? resumeAfter = null;
-                foreach (var entry in replay)
+                // Register-then-replay can fail (a custom store may throw from GetReplay, or an enqueue
+                // may throw): if it does, drop the subscriber we just registered before the exception
+                // unwinds. Subscribe() propagates the throw and never returns a StreamSubscription, so
+                // its unsubscribe callback can never run; without this the subscriber would stay
+                // registered on the topic forever, leaked, and every future publish would fan out to a
+                // channel no one reads. Removing it here makes a failed resume leave the topic exactly
+                // as it was before the attempt.
+                try
                 {
-                    if (string.Equals(entry.WireId, lastEventId, StringComparison.Ordinal))
-                    {
-                        resumeAfter = entry.Sequence;
-                        break;
-                    }
+                    Resume(subscriber, lastEventId);
                 }
-
-                if (resumeAfter is not { } afterSequence)
+                catch
                 {
-                    return; // unknown / evicted: from-now fallback.
-                }
-
-                foreach (var entry in replay)
-                {
-                    if (entry.Sequence > afterSequence && Accepts(subscriber, entry.Event))
-                    {
-                        // Replay through the SAME policy-honoring enqueue as live publish, so a
-                        // DropNewest subscriber drops the NEWEST replayed events under a full buffer
-                        // (keeping the oldest that fit) exactly as it would for live events, rather
-                        // than letting the channel's native full-mode rewrite the buffered backlog.
-                        // The Wait policy degrades to a single non-blocking attempt here on purpose:
-                        // back-pressure is a live-publish concern and we must not block under the gate
-                        // while attaching a subscriber. A full buffer simply refuses the replayed
-                        // entry, which is acceptable for backlog catch-up.
-                        TryEnqueue(subscriber, entry.Event);
-                    }
+                    subscribers.TryRemove(subscriber.Id, out _);
+                    throw;
                 }
             }
+        }
+
+        private void Resume(Subscriber subscriber, string lastEventId)
+        {
+            // Caller holds the gate, and replayStore is non-null (checked by AddSubscriber).
+
+            // Ask the store to locate the resume point and hand back the entries to replay. The store
+            // owns the match (against each entry's wire id); resume is correct whether the producer
+            // relied on the hub sequence or set its own ids, and an id that matches no retained entry
+            // yields an empty result, which is the from-now fallback. Reading through the seam here is
+            // what lets a custom store serve the backlog without the hub knowing where it lives.
+            var replay = replayStore!.GetReplay(lastEventId);
+            if (replay.Count == 0)
+            {
+                return; // unknown / evicted: from-now fallback.
+            }
+
+            // Replay in ascending Sequence order. The in-memory default already returns the backlog in
+            // sequence order, but a custom store may hold a pre-existing backlog it returns in some
+            // other order (store iteration order, an unordered external query); ordering here at the
+            // seam read makes resume deliver in the order events were published regardless of how a
+            // store enumerates, so the client never sees a reordered backlog. The common case (already
+            // ascending) is detected and skips the sort, keeping the wire path allocation-light.
+            var ordered = InSequenceOrder(replay);
+
+            foreach (var entry in ordered)
+            {
+                // A subscriber filter applies to replayed events too, so only matching backlog is
+                // replayed. Replay through the SAME policy-honoring enqueue as live publish, so a
+                // DropNewest subscriber drops the NEWEST replayed events under a full buffer
+                // (keeping the oldest that fit) exactly as it would for live events, rather than
+                // letting the channel's native full-mode rewrite the buffered backlog. The Wait
+                // policy degrades to a single non-blocking attempt here on purpose: back-pressure is
+                // a live-publish concern and we must not block under the gate while attaching a
+                // subscriber. A full buffer simply refuses the replayed entry, which is acceptable
+                // for backlog catch-up.
+                if (Accepts(subscriber, entry.Event))
+                {
+                    TryEnqueue(subscriber, entry.Event);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Return the backlog in ascending <see cref="ReplayEntry.Sequence"/> order. When the store
+        /// already handed it back in order (the contract, and what the in-memory default does) the
+        /// input list is returned as-is with no allocation; only an out-of-order custom store pays for
+        /// a sorted copy.
+        /// </summary>
+        private static IReadOnlyList<ReplayEntry> InSequenceOrder(IReadOnlyList<ReplayEntry> replay)
+        {
+            for (var i = 1; i < replay.Count; i++)
+            {
+                if (replay[i].Sequence < replay[i - 1].Sequence)
+                {
+                    var sorted = new List<ReplayEntry>(replay);
+                    sorted.Sort(static (a, b) => a.Sequence.CompareTo(b.Sequence));
+                    return sorted;
+                }
+            }
+
+            return replay;
         }
 
         public bool RemoveSubscriber(Guid id) => subscribers.TryRemove(id, out _);
@@ -351,16 +414,13 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
                 // broadcast to every subscriber and retained for replay.
                 var delivery = evt.WithSequence(assigned);
 
-                if (replayCapacity > 0)
-                {
-                    if (replay.Count == replayCapacity)
-                    {
-                        replay.Dequeue();
-                    }
-                    // Capture the value emitted on the wire for this delivery (producer id if set, else
-                    // the hub sequence) so resume can match a returning Last-Event-ID against it.
-                    replay.Enqueue(new ReplayEntry(assigned, delivery.EffectiveId, delivery));
-                }
+                // Retain this delivery through the replay store (when replay is enabled for the topic)
+                // so a reconnecting client can resume from it. Capture the value emitted on the wire
+                // (producer id if set, else the hub sequence) so resume can match a returning
+                // Last-Event-ID against it. The store call runs under the same gate that assigned the
+                // sequence, so the store sees a gap-free, strictly increasing sequence and never has a
+                // publish race a resume read.
+                replayStore?.Append(new ReplayEntry(assigned, delivery.EffectiveId, delivery));
 
                 var delivered = 0;
                 var dropped = 0L;
@@ -498,12 +558,4 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
 
         private readonly record struct DeliveryOutcome(bool Delivered, bool Dropped, bool WasFull);
     }
-
-    /// <summary>
-    /// A buffered delivery retained for replay. <see cref="Sequence"/> is the monotonic ordering key;
-    /// <see cref="WireId"/> is the exact value emitted as this delivery's SSE <c>id:</c> (producer id
-    /// if the event set one, else the hub sequence) and is what a returning Last-Event-ID is matched
-    /// against to locate the resume point.
-    /// </summary>
-    private readonly record struct ReplayEntry(long Sequence, string? WireId, ServerSentEvent Event);
 }

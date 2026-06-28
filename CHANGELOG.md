@@ -6,6 +6,50 @@ All notable changes to OrionStream are documented in this file. The format is ba
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-28
+
+### Added
+
+Resume groundwork: a stated event-id allocation contract and a pluggable replay store seam. All
+additive; with nothing configured the hub, resume, replay, and the in-memory ring behave exactly as
+before.
+
+- Event-id allocation contract: the hub's id allocation is now a documented contract on `ISseHub`
+  (XML docs and [FEATURES.md](docs/FEATURES.md)), not an implementation detail, so a replay store can
+  rely on what an id means. The contract states the per-topic, strictly-increasing, gap-free hub
+  sequence (starting at 1); that monotonicity scope is per topic and sequences are not comparable
+  across topics; that a producer-supplied `Id` always wins on the wire while the sequence is still
+  assigned underneath; the ascending-sequence ordering guarantee; and what a consumer may and may not
+  assume when producer ids and hub sequences mix on one topic (each round-trips through resume by exact
+  wire-id match, but wire ids are not globally ordered, numeric, or comparable across the two kinds).
+- Pluggable replay store seam: the per-topic backlog is abstracted behind `IReplayStore` (with
+  `ReplayEntry` and an `IReplayStoreFactory`), so the in-memory ring is one implementation and a caller
+  can swap in an external store without the hub knowing where the backlog lives. `InMemoryReplayStore`
+  (handed out by `InMemoryReplayStoreFactory`) stays the default and the only implementation with no
+  dependencies; `AddOrionStream` registers it via `TryAdd`, so registering a custom factory first wins.
+  The hub reads resume backlog through the seam, serializing every store call under the same per-topic
+  lock it assigns sequences under, so a store sees a gap-free sequence and the in-memory store needs no
+  internal locking. Behavior is identical when the default store is used; a topic with replay disabled
+  gets no store at all.
+
+### Deferred
+
+- Durable / backplane replay store (Redis- or Postgres-backed, surviving a process restart and a
+  different instance behind a load balancer) is still planned and explicitly out of this release. It
+  will ship as a separate opt-in package behind the `IReplayStore` seam; the core stays in-process
+  fan-out with no mandatory dependency.
+
+### Tests
+
+16 new tests: the event-id contract guarantees (per-topic gap-free sequence starting at 1; sequence
+assigned even when a producer id is present; per-topic independence; producer id wins on the wire;
+delivery order equals publish order; mixed producer-id and hub-sequence events each round-trip through
+resume; a reused producer wire id resumes from the oldest match; the buffer retains in ascending
+sequence order); and the replay store seam (the default hub uses the in-memory factory; resume through
+the default replays identically; no store is created for a replay-disabled topic; a custom store is
+appended to on publish; resume reads the backlog from a custom store and from-now falls back on an
+empty result; a custom store's `HasBacklog` keeps an idle topic alive).
+
 ## [0.4.0] - 2026-06-27
 
 ### Added
@@ -145,6 +189,7 @@ Initial release. Server-Sent Events for ASP.NET Core.
 16 tests across the formatter, the hub (fan-out, topic isolation, unsubscribe, drop-oldest,
 double-dispose), the response writer, and registration.
 
+[0.5.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.3.0
 [0.2.1]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.2.1
