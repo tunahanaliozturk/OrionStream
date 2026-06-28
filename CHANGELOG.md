@@ -6,6 +6,44 @@ All notable changes to OrionStream are documented in this file. The format is ba
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-28
+
+### Added
+
+The durable backplane replay store that plugs into the 0.5.0 seam, shipped as a new opt-in package
+`OrionStream.Redis` (PackageId `OrionStream.Redis`). All additive: the core hub is unchanged, the
+in-memory ring stays the default, and nothing moves to Redis unless the new registration is called.
+
+- `OrionStream.Redis`: a Redis-backed `IReplayStore` (`RedisReplayStore`) and its
+  `RedisReplayStoreFactory`, over `StackExchange.Redis`. With it registered, a client can resume by
+  `Last-Event-ID` after a load balancer reconnects it to a *different* hub instance, and the backlog
+  survives a process restart, because the backlog lives in Redis rather than in the publishing process.
+- Scope is exactly the resume backlog. It does not turn the hub into a cross-instance publish bus: an
+  event published on instance A is still delivered only to A's live subscribers; Redis is read on resume
+  to rebuild what a reconnecting client missed, not to fan out live events between instances.
+- Redis structure: one capped list per topic, keyed `{KeyPrefix}{topic}` (default prefix
+  `orionstream:replay:`), holding JSON-encoded entries oldest first. Each append is an `RPUSH` then an
+  `LTRIM` that keeps the newest `capacity` entries, matching the `ReplayBufferCapacity`
+  drop-oldest-beyond-capacity bound. Entries are ordered by the hub's gap-free per-topic sequence;
+  resume matches the returning `Last-Event-ID` against the exact wire id each entry emitted, resolves a
+  duplicate id to the oldest matching entry, and replays the ascending suffix after it: the same
+  ordering and duplicate-WireId contract the in-memory store documents.
+- Registration: `AddOrionStreamRedisReplayStore(connectionString, configure?)` (registers a shared
+  `IConnectionMultiplexer` and swaps the factory) or `AddOrionStreamRedisReplayStore(configure?)` over
+  an already-registered multiplexer. The Redis factory replaces the in-memory default definitively, so
+  call order relative to `AddOrionStream` does not matter. `RedisReplayStoreOptions` tunes the key
+  prefix, database index, and an optional sliding backlog TTL.
+
+### Tests
+
+14 new tests against a REAL Redis via Testcontainers (`Testcontainers.Redis`): cross-instance resume
+(an append on one store instance, and a publish on one hub instance, replayed in sequence order by a
+second instance pointed at the same Redis, including over a separate multiplexer); the bounded
+drop-oldest capacity; the duplicate-WireId resolution to the oldest match; resume-by-`Last-Event-ID`
+returning the right slice; the unknown-id from-now fallback; producer-supplied ids round-tripping
+through cross-instance resume; and backlog survival across a new store instance modelling a restart.
+The Redis test project is single-TFM (net10.0) and CI-validated under the build matrix.
+
 ## [0.5.0] - 2026-06-28
 
 ### Added
@@ -189,6 +227,7 @@ Initial release. Server-Sent Events for ASP.NET Core.
 16 tests across the formatter, the hub (fan-out, topic isolation, unsubscribe, drop-oldest,
 double-dispose), the response writer, and registration.
 
+[0.6.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.6.0
 [0.5.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.3.0

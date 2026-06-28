@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <PackageId>OrionStream.Redis</PackageId>
+    <RootNamespace>Moongazing.OrionStream.Redis</RootNamespace>
+    <Description>Redis-backed durable replay store for OrionStream: a cross-instance, restart-surviving Last-Event-ID resume backlog behind the IReplayStore seam, over StackExchange.Redis.</Description>
+    <PackageTags>sse;server-sent-events;streaming;realtime;aspnetcore;redis;replay;backplane;orion</PackageTags>
+    <!-- This package ships its own README and reuses the family icon under docs/. Overriding the
+         readme/icon here, and dropping the root-README pack item the shared props add for packable
+         projects, keeps the NuGet readme accurate and avoids a duplicate README.md pack path. -->
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Moongazing.OrionStream\Moongazing.OrionStream.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The shared Directory.Build.props packs the repo-root README.md to the package root for every
+         packable project. Drop that one item (matched on the same absolute path the props evaluate to)
+         so this package ships its OWN README instead. The icon/logo items the props add are reused
+         as-is, so PackageIcon=icon.png above resolves to the already-packed family icon with no
+         duplicate. -->
+    <None Remove="$(MSBuildThisFileDirectory)..\..\README.md" />
+    <None Include="docs/README.md" Pack="true" PackagePath="\README.md" Visible="false" />
+  </ItemGroup>
+</Project>
