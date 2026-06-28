@@ -1,11 +1,12 @@
 # OrionStream Roadmap
 
-OrionStream is at **0.4.0**: an in-process Server-Sent Events hub for ASP.NET Core, with topic
-fan-out, `Last-Event-ID` resume from a bounded per-topic replay buffer, an allocation-light wire
-writer, a one-line endpoint mapping helper, typed and async-enumerable publish/consume sugar,
-per-topic metric tags plus a publish/subscribe `ActivitySource`, and a configurable delivery and
-back-pressure surface (full-buffer policy, slow-consumer disconnect, per-topic capacity overrides,
-and per-subscriber filtering).
+OrionStream is at **0.5.0**: an in-process Server-Sent Events hub for ASP.NET Core, with topic
+fan-out, `Last-Event-ID` resume from a bounded per-topic replay buffer behind a pluggable
+`IReplayStore` seam, a documented event-id allocation contract, an allocation-light wire writer, a
+one-line endpoint mapping helper, typed and async-enumerable publish/consume sugar, per-topic metric
+tags plus a publish/subscribe `ActivitySource`, and a configurable delivery and back-pressure surface
+(full-buffer policy, slow-consumer disconnect, per-topic capacity overrides, and per-subscriber
+filtering).
 
 This is a list of ideas under consideration, not a schedule and not a set of promises. Items here
 may ship, change shape, or be dropped. The goal is to be honest about what the library does today
@@ -80,6 +81,18 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
   optional predicate evaluated before the event enters the subscriber's buffer, so a chatty topic does
   not fill a client's buffer with events it would discard. The filter also applies to replayed backlog
   on resume.
+- **Event-id allocation contract (0.5.0).** The hub's id allocation is now a stated contract on
+  `ISseHub` (XML docs and [FEATURES.md](FEATURES.md)), not an implementation detail: a per-topic,
+  strictly-increasing, gap-free hub sequence starting at 1; monotonicity scoped per topic; a
+  producer-supplied id always winning on the wire while the sequence is still assigned underneath; an
+  ascending-sequence ordering guarantee; and what a consumer may and may not assume when producer ids
+  and hub sequences mix on one topic. This is the prerequisite for any durable or cross-instance resume
+  store, since those have to agree on what an id means.
+- **Pluggable replay store seam (0.5.0).** The per-topic replay buffer is abstracted behind
+  `IReplayStore` (with `ReplayEntry` and an `IReplayStoreFactory`), so the in-memory ring is one
+  implementation and a caller can swap in an external store without the hub knowing where the backlog
+  lives. `InMemoryReplayStore` stays the default and the only one with no dependencies; resume reads
+  through the seam, and behavior is identical with the default store.
 
 ---
 
@@ -88,25 +101,20 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
 These are possibilities, ordered loosely by how aligned they are with the library's purpose. None is
 committed, and the version tags are targets.
 
-### Resume and multi-instance (targeting 0.5.0, ~Q1 2027)
+### Resume and multi-instance (durable store still planned, ~Q1 2027)
 
-- **A documented event-id allocation contract.** The hub already assigns a topic-monotonic sequence
-  when the producer sets no `Id`, and a producer id always wins on the wire. Promoting that from an
-  implementation detail to a stated contract (monotonicity scope, ordering guarantees, what a
-  consumer may assume when mixing producer ids and hub sequences on one topic) is a prerequisite for
-  any durable or cross-instance resume store, since those have to agree on what an id means.
-- **A pluggable replay store.** An abstraction over the per-topic replay buffer so the in-memory ring
-  is one implementation behind an interface, letting a caller swap in an external store without the
-  hub knowing where the backlog lives. The in-memory store stays the default and the only one with
-  no dependencies.
-- **A durable / backplane replay store (opt-in package).** A Redis- or Postgres-backed replay store
-  behind that abstraction, so a client can resume by `Last-Event-ID` after reconnecting to a
-  *different* instance behind a load balancer, and so a backlog survives a process restart. This
-  would ship as a separate opt-in package, not in the core: the core hub stays in-process fan-out
-  with no mandatory dependency. It is scoped specifically to the resume backlog. It does not turn the
-  hub into a publish bus across instances; an event published on instance A is still delivered only
-  to instance A's live subscribers (see non-goals). Whether cross-instance live fan-out is worth
-  building at all is an open question to settle after the store abstraction exists.
+The event-id allocation contract and the pluggable `IReplayStore` seam shipped in 0.5.0 (see
+*Recently shipped*). What remains is the durable store that plugs into that seam.
+
+- **A durable / backplane replay store (opt-in package, still planned).** A Redis- or Postgres-backed
+  `IReplayStore` behind the seam that now exists, so a client can resume by `Last-Event-ID` after
+  reconnecting to a *different* instance behind a load balancer, and so a backlog survives a process
+  restart. This will ship as a separate opt-in package, not in the core: the core hub stays in-process
+  fan-out with no mandatory dependency. It is scoped specifically to the resume backlog. It does not
+  turn the hub into a publish bus across instances; an event published on instance A is still delivered
+  only to instance A's live subscribers (see non-goals). Whether cross-instance live fan-out is worth
+  building at all is an open question to settle now that the store abstraction exists. Explicitly out
+  of the 0.5.0 release.
 
 ### Hardening (targeting 0.5.0, ~Q1 2027)
 

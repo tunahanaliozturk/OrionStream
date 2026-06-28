@@ -1,6 +1,6 @@
 # OrionStream Features
 
-A reference for everything in the current public surface (0.4.0). Every item here maps to a type or
+A reference for everything in the current public surface (0.5.0). Every item here maps to a type or
 member you can call today. For ideas not yet built, see [ROADMAP.md](ROADMAP.md).
 
 ---
@@ -13,11 +13,12 @@ member you can call today. For ideas not yet built, see [ROADMAP.md](ROADMAP.md)
 4. [The wire-format renderer](#4-the-wire-format-renderer)
 5. [The HTTP writer](#5-the-http-writer)
 6. [Delivery and back-pressure](#6-delivery-and-back-pressure)
-7. [Heartbeats and reconnect](#7-heartbeats-and-reconnect)
-8. [Options and validation](#8-options-and-validation)
-9. [Telemetry](#9-telemetry)
-10. [Dependency injection](#10-dependency-injection)
-11. [Target frameworks](#11-target-frameworks)
+7. [Resume, event-id contract, and the replay store](#7-resume-event-id-contract-and-the-replay-store)
+8. [Heartbeats and reconnect](#8-heartbeats-and-reconnect)
+9. [Options and validation](#9-options-and-validation)
+10. [Telemetry](#10-telemetry)
+11. [Dependency injection](#11-dependency-injection)
+12. [Target frameworks](#12-target-frameworks)
 
 ---
 
@@ -234,7 +235,87 @@ path and must not throw.
 
 ---
 
-## 7. Heartbeats and reconnect
+## 7. Resume, event-id contract, and the replay store
+
+### The event-id allocation contract
+
+Every published event carries an `id:` on the wire, and resume matches a returning `Last-Event-ID`
+against it. How that id is chosen is a stated contract, documented on `ISseHub`, not an implementation
+detail, because a replay store (here, or a future durable one) has to agree on what an id means.
+
+- **Hub sequence.** On every `Publish` the hub assigns the topic a sequence that is strictly
+  increasing by one with no gaps, starting at `1` for the first event published to that topic. A
+  sequence is assigned to every event, whether or not the producer set its own `Id`; setting a
+  producer id does not skip or perturb the sequence.
+- **Monotonicity scope is per topic.** Each topic has its own independent sequence. Sequence numbers
+  are comparable only within one topic; two topics reuse the same values.
+- **Producer id always wins on the wire.** The wire id is the producer-supplied `Id` when the event
+  set one, and the hub sequence (as a decimal string) otherwise. The hub never overwrites a producer
+  id and never emits both. The sequence is still assigned underneath.
+- **Ordering guarantee.** Within one topic the hub delivers and retains events in ascending sequence
+  order, which is the order `Publish` was called. The sequence is the ordering key for resume
+  regardless of which wire id an event carried.
+
+When producer ids and hub sequences mix on one topic, a consumer may assume each kind round-trips
+through resume by exact wire-id match, but must **not** assume wire ids are globally ordered, numeric,
+or comparable across the two kinds: a producer id is an opaque string, only the underlying hub
+sequence is ordered, and it is not on the wire when a producer id is present. Ordering is the hub's
+responsibility; the wire id is for resume matching, not client-side ordering. Producer ids are not
+required to be unique; if a producer reuses one, resume matches the oldest retained entry carrying it.
+
+### Resume semantics
+
+`Subscribe(topic, lastEventId)` resumes after a client-supplied `Last-Event-ID`. When the id exactly
+matches the wire id of a retained event, the events published after it are replayed before live events
+flow, so the client misses nothing across a reconnect. An id that matches no retained entry (unknown,
+or evicted because it is older than the buffer still holds) falls back to a from-now stream with no
+replay. Resume is all-or-nothing: a client either resumes exactly or starts clean, never on a partial
+or gapped backlog. Replayed events count against the subscriber buffer like any other event, and a
+per-subscriber filter applies to replayed backlog too.
+
+### The pluggable replay store
+
+The per-topic backlog lives behind the `IReplayStore` seam, so the in-memory ring is one
+implementation and a caller can swap in an external store without the hub knowing where the backlog
+is kept. The hub owns event-id allocation and live delivery; a store owns only retention and the
+resume-point lookup.
+
+```csharp
+public readonly record struct ReplayEntry(long Sequence, string? WireId, ServerSentEvent Event);
+
+public interface IReplayStore
+{
+    void Append(ReplayEntry entry);
+    IReadOnlyList<ReplayEntry> GetReplay(string lastEventId);
+    bool HasBacklog { get; }
+}
+
+public interface IReplayStoreFactory
+{
+    IReplayStore Create(string topic, int capacity);
+}
+```
+
+- `Append` retains one delivery, in ascending `Sequence` order, bounded to the configured capacity
+  (oldest evicted first).
+- `GetReplay` returns the entries after the exactly-matched wire id, in order, or an empty list for
+  the from-now fallback. It must never return a partial backlog.
+- `HasBacklog` lets the hub keep an otherwise-idle topic alive while a backlog a later client could
+  resume from still exists.
+
+The hub serializes every call to a given store instance under that topic's lock, the same lock it
+assigns sequences under, so a store sees a gap-free, strictly increasing sequence on `Append` and
+never has a publish race a `GetReplay`. Because of that the in-memory implementation needs no internal
+locking. The default is `InMemoryReplayStore` (handed out by `InMemoryReplayStoreFactory`); it is the
+only implementation with no dependencies and stays the default. A topic with `ReplayBufferCapacity`
+of `0` gets no store at all, keeping the wire path light. A durable, cross-instance replay store
+(Redis- or Postgres-backed, surviving a process restart and a different instance behind a load
+balancer) is **still planned** and will ship as a separate opt-in package behind this same seam; it
+is out of the core, which stays in-process fan-out with no mandatory dependency.
+
+---
+
+## 8. Heartbeats and reconnect
 
 - **Heartbeats.** On an idle stream the writer emits `SseFormatter.Heartbeat`, an SSE comment that
   carries no event but keeps proxies and load balancers from closing the connection.
@@ -245,7 +326,7 @@ path and must not throw.
 
 ---
 
-## 8. Options and validation
+## 9. Options and validation
 
 ```csharp
 public sealed class StreamOptions
@@ -267,7 +348,8 @@ public sealed class StreamOptions
   on how long a slow subscriber can stall a publish.
 - `SlowConsumerPolicy.MaxConsecutiveFullPublishes` must be at least `1`. Null disables the policy.
 - `HeartbeatInterval` must be positive.
-- `ReplayBufferCapacity` must be zero or greater; `0` disables `Last-Event-ID` replay.
+- `ReplayBufferCapacity` must be zero or greater; `0` disables `Last-Event-ID` replay (no replay store
+  is created for that topic). It is the capacity passed to `IReplayStoreFactory.Create`.
 - `ConfigureTopic` overrides per topic: each override's `SubscriberCapacity` (if set) must be at least
   `1` and `ReplayBufferCapacity` (if set) zero or greater.
 - `SerializerOptions` is the default serializer for the typed publish helpers (web defaults).
@@ -277,7 +359,7 @@ rather than at first use.
 
 ---
 
-## 9. Telemetry
+## 10. Telemetry
 
 `StreamDiagnostics` owns a `System.Diagnostics.Metrics.Meter` and an
 `System.Diagnostics.ActivitySource`, both named `Moongazing.OrionStream` (`StreamDiagnostics.MeterName`).
@@ -299,7 +381,7 @@ into OpenTelemetry with `AddMeter(StreamDiagnostics.MeterName)` and
 
 ---
 
-## 10. Dependency injection
+## 11. Dependency injection
 
 ```csharp
 public static IServiceCollection AddOrionStream(
@@ -307,18 +389,21 @@ public static IServiceCollection AddOrionStream(
     Action<StreamOptions>? configure = null);
 ```
 
-`AddOrionStream` registers three singletons via `TryAdd`, so each can be overridden:
+`AddOrionStream` registers four singletons via `TryAdd`, so each can be overridden:
 
 - `StreamOptions` (the configured instance)
 - `StreamDiagnostics`
+- `IReplayStoreFactory` -> `InMemoryReplayStoreFactory` (the default in-memory ring)
 - `ISseHub` -> `SseHub`
 
-Because registration uses `TryAdd`, registering your own `ISseHub`, `StreamOptions`, or
-`StreamDiagnostics` before calling `AddOrionStream` wins.
+Because registration uses `TryAdd`, registering your own `IReplayStoreFactory`, `ISseHub`,
+`StreamOptions`, or `StreamDiagnostics` before calling `AddOrionStream` wins. Registering a custom
+`IReplayStoreFactory` is how a caller swaps the backlog store without touching the hub; the durable
+cross-instance store, still planned, ships that way as a separate opt-in package.
 
 ---
 
-## 11. Target frameworks
+## 12. Target frameworks
 
 OrionStream multi-targets `net8.0`, `net9.0`, and `net10.0`. Nullable reference types are enabled,
 analyzers run at `latest-recommended`, warnings are treated as errors, and an XML documentation file
