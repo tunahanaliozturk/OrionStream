@@ -30,6 +30,14 @@ namespace Moongazing.OrionStream.Streaming;
 /// <item><description>Resume is all-or-nothing: <see cref="GetReplay"/> replays the suffix after an
 /// exactly matched <see cref="ReplayEntry.WireId"/>, or nothing at all when the id matches no retained
 /// entry. It must never return a partial or gapped backlog.</description></item>
+/// <item><description>Resolve a duplicate <see cref="ReplayEntry.WireId"/> by matching the
+/// <em>oldest</em> (lowest <see cref="ReplayEntry.Sequence"/>) retained entry that carries it, and
+/// replay the suffix after that entry. Producer ids are not required to be unique (the hub never
+/// enforces it), so two retained entries may share a <see cref="ReplayEntry.WireId"/>; matching the
+/// oldest replays the most events and never silently skips one. Hub sequences never collide, so this
+/// only bites when a producer reuses an id. The contract is first-match-wins on an ascending-sequence
+/// scan; a store must implement it consistently so resume behaves the same wherever the backlog
+/// lives.</description></item>
 /// </list>
 /// <para>
 /// The default in-memory implementation is <see cref="InMemoryReplayStore"/>; it is the only one with
@@ -55,9 +63,11 @@ public interface IReplayStore
     /// retained entry, the result is every retained entry after it in ascending
     /// <see cref="ReplayEntry.Sequence"/> order. When it matches no retained entry (unknown, or evicted
     /// because it is older than the buffer still holds), the result is empty: the caller falls back to a
-    /// from-now stream. The result is never a partial backlog. The caller is responsible for applying
-    /// any per-subscriber filter and buffer policy to the returned entries; the store only locates and
-    /// orders them.
+    /// from-now stream. The result is never a partial backlog. When more than one retained entry shares
+    /// <paramref name="lastEventId"/> as its <see cref="ReplayEntry.WireId"/> (possible only for a
+    /// reused producer id; hub sequences never collide), match the oldest such entry and replay the
+    /// suffix after it. The caller is responsible for applying any per-subscriber filter and buffer
+    /// policy to the returned entries; the store only locates and orders them.
     /// </remarks>
     /// <param name="lastEventId">The non-empty wire id the client last saw.</param>
     /// <returns>The entries to replay, in order, or an empty list for the from-now fallback.</returns>

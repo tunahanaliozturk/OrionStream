@@ -266,12 +266,18 @@ required to be unique; if a producer reuses one, resume matches the oldest retai
 ### Resume semantics
 
 `Subscribe(topic, lastEventId)` resumes after a client-supplied `Last-Event-ID`. When the id exactly
-matches the wire id of a retained event, the events published after it are replayed before live events
-flow, so the client misses nothing across a reconnect. An id that matches no retained entry (unknown,
-or evicted because it is older than the buffer still holds) falls back to a from-now stream with no
-replay. Resume is all-or-nothing: a client either resumes exactly or starts clean, never on a partial
-or gapped backlog. Replayed events count against the subscriber buffer like any other event, and a
-per-subscriber filter applies to replayed backlog too.
+matches the wire id of a retained event, the events published after it are replayed (in ascending
+sequence order) before live events flow, so a reconnecting client picks up where it left off without
+the hub dropping anything on the publish side. Two caveats bound that: the resumable window is only
+what the replay buffer still holds (`ReplayBufferCapacity` events per topic), so an event evicted
+before reconnect cannot be replayed; and replayed events count against the subscriber buffer like any
+other event, so a small subscriber buffer combined with a drop policy can still shed some replayed
+backlog before the reader drains it. An id that matches no retained entry (unknown, or evicted because
+it is older than the buffer still holds) falls back to a from-now stream with no replay. Resume is
+all-or-nothing on the lookup: a client either resumes from an exact match or starts clean, never on a
+partial or gapped lookup result. A per-subscriber filter applies to replayed backlog too. If a
+producer reused a wire id across two retained events, resume matches the oldest entry carrying it (the
+seam contract; hub sequences never collide).
 
 ### The pluggable replay store
 
@@ -298,8 +304,12 @@ public interface IReplayStoreFactory
 
 - `Append` retains one delivery, in ascending `Sequence` order, bounded to the configured capacity
   (oldest evicted first).
-- `GetReplay` returns the entries after the exactly-matched wire id, in order, or an empty list for
-  the from-now fallback. It must never return a partial backlog.
+- `GetReplay` returns the entries after the exactly-matched wire id, in ascending `Sequence` order, or
+  an empty list for the from-now fallback. It must never return a partial backlog. When a producer
+  reused a wire id and two retained entries share it, match the oldest (lowest-sequence) one. The hub
+  re-orders the returned backlog by `Sequence` before delivery, so a store that enumerates a
+  pre-existing backlog out of order still resumes correctly, but a store should still return entries in
+  order per this contract.
 - `HasBacklog` lets the hub keep an otherwise-idle topic alive while a backlog a later client could
   resume from still exists.
 

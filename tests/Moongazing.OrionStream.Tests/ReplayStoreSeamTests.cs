@@ -140,23 +140,101 @@ public sealed class ReplayStoreSeamTests
     {
         using var diag = new StreamDiagnostics();
         var store = new FakeReplayStore();
-        var hub = new SseHub(new StreamOptions(), diag, new SingleStoreFactory(store));
+        var factory = new SingleStoreFactory(store);
+        var hub = new SseHub(new StreamOptions(), diag, factory);
 
         store.Seed(new ReplayEntry(1, "1", Event("a")));
 
         // A subscriber that comes and goes must not reclaim the topic while the store still has backlog,
-        // because a later client could resume from it. The hub reads HasBacklog through the seam.
+        // because a later client could resume from it. The hub reads HasBacklog through the seam. The
+        // store is created the first time the topic is seen.
+        store.HasBacklogOverride = true;
         using (var sub = hub.Subscribe("orders"))
         {
             Assert.Equal(1, hub.SubscriberCount("orders"));
         }
 
-        store.HasBacklogOverride = true;
-        Assert.True(store.HasBacklog);
+        Assert.Equal(1, factory.CreatedCount);
 
-        // Resume still finds the seeded backlog after the subscriber left.
+        // The subscriber has left, but the store still reports backlog through the seam, so the topic
+        // must NOT have been reclaimed. Asserting the topic survived (rather than only that resume
+        // returned data) is what makes this prove the seam kept the topic alive: a SingleStoreFactory
+        // would hand the same store back even to a freshly recreated topic, so a resume-returns-"a"
+        // assertion alone would pass even if the topic had been reclaimed and rebuilt.
+        Assert.Equal(1, hub.TopicCount);
+
+        // Resume still finds the seeded backlog, and it came through the seam (GetReplay was called),
+        // without the factory ever being asked to create a second store for a recreated topic.
         using var resumed = hub.Subscribe("orders", lastEventId: "marker");
         Assert.Equal("a", Datas(Drain(resumed)));
+        Assert.Equal(1, store.GetReplayCount);
+        Assert.Equal(1, factory.CreatedCount);
+    }
+
+    [Fact]
+    public void A_failed_resume_setup_does_not_leak_the_subscriber()
+    {
+        using var diag = new StreamDiagnostics();
+        var store = new ThrowingGetReplayStore();
+        var hub = new SseHub(new StreamOptions(), diag, new SingleStoreFactory(store));
+
+        // Seed backlog so the topic survives subscriber departures and HasBacklog is true; the resume
+        // path will reach GetReplay, which throws.
+        store.Seed(new ReplayEntry(1, "1", Event("a")));
+
+        // Resume setup throws after the subscriber was registered under the topic gate. The hub must
+        // unwind that registration before the exception escapes, otherwise the subscriber is leaked:
+        // registered on the topic but never streamed (Subscribe never returned a subscription whose
+        // disposal could remove it).
+        Assert.Throws<InvalidOperationException>(() => hub.Subscribe("orders", lastEventId: "marker"));
+
+        // No leak: the failed resume left no subscriber behind on the topic.
+        Assert.Equal(0, hub.SubscriberCount("orders"));
+
+        // And the topic is still usable: a later publish does not fan out to a dead, leaked channel,
+        // and a fresh subscriber receives live events normally.
+        store.ThrowOnGetReplay = false;
+        using var live = hub.Subscribe("orders");
+        hub.Publish("orders", Event("after"));
+        Assert.Equal("after", Datas(Drain(live)));
+    }
+
+    [Fact]
+    public void A_pre_existing_backlog_replays_in_sequence_order_even_when_the_store_returns_it_unordered()
+    {
+        using var diag = new StreamDiagnostics();
+        var store = new UnorderedBacklogStore();
+        var hub = new SseHub(new StreamOptions(), diag, new SingleStoreFactory(store));
+
+        // A custom store holds a pre-existing backlog the hub never published, and returns it OUT of
+        // sequence order (e.g. an external query with no ORDER BY). The hub must replay it in ascending
+        // Sequence order regardless, so the client never sees a reordered backlog.
+        store.Seed(new ReplayEntry(3, "s3", Event("c")));
+        store.Seed(new ReplayEntry(1, "s1", Event("a")));
+        store.Seed(new ReplayEntry(2, "s2", Event("b")));
+
+        using var resumed = hub.Subscribe("orders", lastEventId: "marker");
+        Assert.Equal("a,b,c", Datas(Drain(resumed)));
+    }
+
+    [Fact]
+    public void In_memory_store_resolves_a_duplicate_wire_id_to_the_oldest_entry()
+    {
+        // The seam contract: when two retained entries share a wire id (only possible for a reused
+        // producer id), resume matches the OLDEST and replays the suffix after it. Drive the in-memory
+        // default through the hub with a producer that reuses an id.
+        using var diag = new StreamDiagnostics();
+        var hub = new SseHub(new StreamOptions(), diag, new InMemoryReplayStoreFactory());
+
+        hub.Publish("orders", new ServerSentEvent { Data = "a", Id = "dup" }); // seq 1, wire id "dup"
+        hub.Publish("orders", Event("b"));                                     // seq 2, wire id "2"
+        hub.Publish("orders", new ServerSentEvent { Data = "c", Id = "dup" }); // seq 3, wire id "dup"
+        hub.Publish("orders", Event("d"));                                     // seq 4, wire id "4"
+
+        // Last-Event-ID "dup" matches the OLDEST entry carrying it (seq 1), so the suffix after seq 1 is
+        // replayed: b, c, d. Matching the newest "dup" instead would have silently dropped b and c.
+        using var resumed = hub.Subscribe("orders", lastEventId: "dup");
+        Assert.Equal("b,c,d", Datas(Drain(resumed)));
     }
 
     /// <summary>An <see cref="IReplayStoreFactory"/> that records each create and delegates to an inner factory.</summary>
@@ -177,10 +255,20 @@ public sealed class ReplayStoreSeamTests
         }
     }
 
-    /// <summary>An <see cref="IReplayStoreFactory"/> that always hands back the same supplied store instance.</summary>
+    /// <summary>
+    /// An <see cref="IReplayStoreFactory"/> that always hands back the same supplied store instance and
+    /// counts how many times the hub asked it to create a store. A second create for the same topic
+    /// means the hub reclaimed and recreated the topic, which a test can assert did NOT happen.
+    /// </summary>
     private sealed class SingleStoreFactory(IReplayStore store) : IReplayStoreFactory
     {
-        public IReplayStore Create(string topic, int capacity) => store;
+        public int CreatedCount { get; private set; }
+
+        public IReplayStore Create(string topic, int capacity)
+        {
+            CreatedCount++;
+            return store;
+        }
     }
 
     /// <summary>
@@ -196,6 +284,8 @@ public sealed class ReplayStoreSeamTests
 
         public string? LastGetReplayArg { get; private set; }
 
+        public int GetReplayCount { get; private set; }
+
         public bool? HasBacklogOverride { get; set; }
 
         public bool HasBacklog => HasBacklogOverride ?? (seeded.Count > 0 || Appended.Count > 0);
@@ -206,8 +296,55 @@ public sealed class ReplayStoreSeamTests
 
         public IReadOnlyList<ReplayEntry> GetReplay(string lastEventId)
         {
+            GetReplayCount++;
             LastGetReplayArg = lastEventId;
             return seeded;
         }
+    }
+
+    /// <summary>
+    /// An <see cref="IReplayStore"/> whose <see cref="GetReplay"/> throws, modelling a custom store that
+    /// fails (a broken external query, a transient backend error) during resume setup. Reports backlog
+    /// so the hub keeps the topic and actually reaches the resume path.
+    /// </summary>
+    private sealed class ThrowingGetReplayStore : IReplayStore
+    {
+        private readonly List<ReplayEntry> seeded = [];
+
+        public bool ThrowOnGetReplay { get; set; } = true;
+
+        public bool HasBacklog => seeded.Count > 0;
+
+        public void Seed(ReplayEntry entry) => seeded.Add(entry);
+
+        public void Append(ReplayEntry entry) => seeded.Add(entry);
+
+        public IReadOnlyList<ReplayEntry> GetReplay(string lastEventId)
+        {
+            if (ThrowOnGetReplay)
+            {
+                throw new InvalidOperationException("simulated replay-store failure during resume setup");
+            }
+
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// An <see cref="IReplayStore"/> that returns its seeded backlog in insertion order, which a test
+    /// deliberately seeds OUT of sequence order, to prove the hub re-orders the backlog by
+    /// <see cref="ReplayEntry.Sequence"/> at the seam read.
+    /// </summary>
+    private sealed class UnorderedBacklogStore : IReplayStore
+    {
+        private readonly List<ReplayEntry> seeded = [];
+
+        public bool HasBacklog => seeded.Count > 0;
+
+        public void Seed(ReplayEntry entry) => seeded.Add(entry);
+
+        public void Append(ReplayEntry entry) => seeded.Add(entry);
+
+        public IReadOnlyList<ReplayEntry> GetReplay(string lastEventId) => seeded;
     }
 }

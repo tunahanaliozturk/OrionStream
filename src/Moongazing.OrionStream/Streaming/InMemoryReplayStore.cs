@@ -58,6 +58,12 @@ public sealed class InMemoryReplayStore : IReplayStore
         // otherwise the hub sequence). This is what makes resume correct whether the producer relied on
         // the hub sequence or set its own ids: the id the browser sends back is always the id it last
         // saw on the wire, and that is what we match here.
+        //
+        // The ring is ordered by ascending sequence (oldest at the front), so the FIRST match is the
+        // oldest entry carrying the id. Breaking on it implements the seam's duplicate-WireId contract:
+        // when a producer reused an id and two entries share it, resume matches the oldest and replays
+        // the suffix after it (replaying the most events, never silently skipping one). Hub sequences
+        // never collide, so this only bites for a reused producer id.
         long? resumeAfter = null;
         foreach (var entry in ring)
         {

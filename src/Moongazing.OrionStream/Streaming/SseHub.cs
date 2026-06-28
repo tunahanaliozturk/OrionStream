@@ -316,35 +316,85 @@ public sealed class SseHub : ISseHub, IStreamSerializerOptionsProvider
                     return;
                 }
 
-                // Ask the store to locate the resume point and hand back the entries to replay. The
-                // store owns the match (against each entry's wire id) and the ordering (ascending
-                // sequence after the match); resume is correct whether the producer relied on the hub
-                // sequence or set its own ids, and an id that matches no retained entry yields an empty
-                // result, which is the from-now fallback. Reading through the seam here is what lets a
-                // custom store serve the backlog without the hub knowing where it lives.
-                var replay = replayStore.GetReplay(lastEventId);
-                if (replay.Count == 0)
+                // Register-then-replay can fail (a custom store may throw from GetReplay, or an enqueue
+                // may throw): if it does, drop the subscriber we just registered before the exception
+                // unwinds. Subscribe() propagates the throw and never returns a StreamSubscription, so
+                // its unsubscribe callback can never run; without this the subscriber would stay
+                // registered on the topic forever, leaked, and every future publish would fan out to a
+                // channel no one reads. Removing it here makes a failed resume leave the topic exactly
+                // as it was before the attempt.
+                try
                 {
-                    return; // unknown / evicted: from-now fallback.
+                    Resume(subscriber, lastEventId);
                 }
-
-                foreach (var entry in replay)
+                catch
                 {
-                    // A subscriber filter applies to replayed events too, so only matching backlog is
-                    // replayed. Replay through the SAME policy-honoring enqueue as live publish, so a
-                    // DropNewest subscriber drops the NEWEST replayed events under a full buffer
-                    // (keeping the oldest that fit) exactly as it would for live events, rather than
-                    // letting the channel's native full-mode rewrite the buffered backlog. The Wait
-                    // policy degrades to a single non-blocking attempt here on purpose: back-pressure is
-                    // a live-publish concern and we must not block under the gate while attaching a
-                    // subscriber. A full buffer simply refuses the replayed entry, which is acceptable
-                    // for backlog catch-up.
-                    if (Accepts(subscriber, entry.Event))
-                    {
-                        TryEnqueue(subscriber, entry.Event);
-                    }
+                    subscribers.TryRemove(subscriber.Id, out _);
+                    throw;
                 }
             }
+        }
+
+        private void Resume(Subscriber subscriber, string lastEventId)
+        {
+            // Caller holds the gate, and replayStore is non-null (checked by AddSubscriber).
+
+            // Ask the store to locate the resume point and hand back the entries to replay. The store
+            // owns the match (against each entry's wire id); resume is correct whether the producer
+            // relied on the hub sequence or set its own ids, and an id that matches no retained entry
+            // yields an empty result, which is the from-now fallback. Reading through the seam here is
+            // what lets a custom store serve the backlog without the hub knowing where it lives.
+            var replay = replayStore!.GetReplay(lastEventId);
+            if (replay.Count == 0)
+            {
+                return; // unknown / evicted: from-now fallback.
+            }
+
+            // Replay in ascending Sequence order. The in-memory default already returns the backlog in
+            // sequence order, but a custom store may hold a pre-existing backlog it returns in some
+            // other order (store iteration order, an unordered external query); ordering here at the
+            // seam read makes resume deliver in the order events were published regardless of how a
+            // store enumerates, so the client never sees a reordered backlog. The common case (already
+            // ascending) is detected and skips the sort, keeping the wire path allocation-light.
+            var ordered = InSequenceOrder(replay);
+
+            foreach (var entry in ordered)
+            {
+                // A subscriber filter applies to replayed events too, so only matching backlog is
+                // replayed. Replay through the SAME policy-honoring enqueue as live publish, so a
+                // DropNewest subscriber drops the NEWEST replayed events under a full buffer
+                // (keeping the oldest that fit) exactly as it would for live events, rather than
+                // letting the channel's native full-mode rewrite the buffered backlog. The Wait
+                // policy degrades to a single non-blocking attempt here on purpose: back-pressure is
+                // a live-publish concern and we must not block under the gate while attaching a
+                // subscriber. A full buffer simply refuses the replayed entry, which is acceptable
+                // for backlog catch-up.
+                if (Accepts(subscriber, entry.Event))
+                {
+                    TryEnqueue(subscriber, entry.Event);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Return the backlog in ascending <see cref="ReplayEntry.Sequence"/> order. When the store
+        /// already handed it back in order (the contract, and what the in-memory default does) the
+        /// input list is returned as-is with no allocation; only an out-of-order custom store pays for
+        /// a sorted copy.
+        /// </summary>
+        private static IReadOnlyList<ReplayEntry> InSequenceOrder(IReadOnlyList<ReplayEntry> replay)
+        {
+            for (var i = 1; i < replay.Count; i++)
+            {
+                if (replay[i].Sequence < replay[i - 1].Sequence)
+                {
+                    var sorted = new List<ReplayEntry>(replay);
+                    sorted.Sort(static (a, b) => a.Sequence.CompareTo(b.Sequence));
+                    return sorted;
+                }
+            }
+
+            return replay;
         }
 
         public bool RemoveSubscriber(Guid id) => subscribers.TryRemove(id, out _);
