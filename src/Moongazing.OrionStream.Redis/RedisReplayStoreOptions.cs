@@ -41,6 +41,13 @@ public sealed class RedisReplayStoreOptions
                 nameof(KeyPrefix));
         }
 
+        if (Database < -1)
+        {
+            throw new ArgumentException(
+                "RedisReplayStoreOptions.Database must be -1 for the multiplexer's default database or a non-negative logical database index.",
+                nameof(Database));
+        }
+
         if (BacklogTimeToLive is { } ttl && ttl <= TimeSpan.Zero)
         {
             throw new ArgumentException(

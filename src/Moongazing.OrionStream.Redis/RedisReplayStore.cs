@@ -1,5 +1,7 @@
 namespace Moongazing.OrionStream.Redis;
 
+using System.Globalization;
+
 using Moongazing.OrionStream.Streaming;
 
 using StackExchange.Redis;
@@ -19,23 +21,57 @@ using StackExchange.Redis;
 /// events between instances.
 /// </para>
 /// <para>
-/// Structure: one Redis list per topic, keyed <c>{KeyPrefix}{topic}</c>, holding JSON
-/// <see cref="ReplayEntry"/> payloads ordered oldest-first. <see cref="Append"/> does an <c>RPUSH</c>
-/// followed by an <c>LTRIM</c> that keeps the newest <c>capacity</c> elements, which is the
-/// DropOldest-beyond-capacity bound the in-memory ring implements and the
-/// <see cref="StreamOptions.ReplayBufferCapacity"/> contract requires. The hub appends in ascending
-/// <see cref="ReplayEntry.Sequence"/> order under its per-topic gate, so list order is sequence order;
-/// <see cref="GetReplay"/> reads the whole list with <c>LRANGE</c> and applies the documented
-/// first-match-wins, oldest-duplicate resolution and ascending-suffix replay against it. The seam's
-/// per-topic single-thread guarantee holds only within one process; the Redis operations are each
-/// server-atomic, and the contract tolerates concurrent appenders because every entry carries the
-/// hub's own gap-free sequence as its ordering key.
+/// Ordering across instances: the hub's <see cref="ReplayEntry.Sequence"/> is allocated
+/// <em>per process</em>, so two instances publishing to the same topic both start their sequence at 1
+/// and the shared Redis backlog would carry colliding, non-comparable sequences if it ordered by them.
+/// This store therefore orders the shared backlog by a <em>Redis-wide</em> monotonic score assigned
+/// atomically at append from a per-topic <c>INCR</c> counter (<c>{key}:seq</c>). That score is the
+/// single total order over every append regardless of which instance made it; resume computes the
+/// replay suffix against it, not against the per-instance hub sequence. The client-facing resume id
+/// stays the entry's <see cref="ReplayEntry.WireId"/> (the producer id or the hub sequence rendered on
+/// the wire): <c>Last-Event-ID</c> is matched against the wire id, and the suffix after the matched
+/// entry is taken in Redis-wide score order.
+/// </para>
+/// <para>
+/// Structure: one Redis list per topic, keyed <c>{KeyPrefix}{topic}</c>, holding elements of the form
+/// <c>{redisScore}|{json}</c> ordered oldest-first, where <c>json</c> is the serialized
+/// <see cref="ReplayEntry"/> and <c>redisScore</c> is the Redis-wide order. <see cref="Append"/> runs a
+/// single Lua script (one <c>EVAL</c>) that increments the per-topic counter, <c>RPUSH</c>es the new
+/// element, <c>LTRIM</c>s to the newest <c>capacity</c> elements (the DropOldest-beyond-capacity bound
+/// the in-memory ring implements and the <see cref="StreamOptions.ReplayBufferCapacity"/> contract
+/// requires) and refreshes the optional TTL, all atomically, so no concurrent reader observes a torn
+/// or over-capacity backlog. <see cref="GetReplay"/> reads the whole list with <c>LRANGE</c> and applies
+/// the documented first-match-wins, oldest-duplicate resolution and ascending-suffix replay keyed on the
+/// Redis-wide score.
 /// </para>
 /// </remarks>
 public sealed class RedisReplayStore : IReplayStore
 {
+    // Separator between the Redis-wide score and the serialized entry in each list element. '|' cannot
+    // appear in the decimal score and is irrelevant to the opaque JSON suffix, so a single split at the
+    // first occurrence is unambiguous.
+    private const char ScoreSeparator = '|';
+
+    // One atomic append. KEYS[1] is the per-topic backlog list, KEYS[2] the per-topic Redis-wide
+    // counter. ARGV[1] is the serialized entry JSON, ARGV[2] the capacity, ARGV[3] the TTL in
+    // milliseconds (0 = no TTL). The whole script runs server-side under Redis's single-threaded
+    // execution, so the INCR, RPUSH, LTRIM and EXPIRE are one indivisible unit: no reader can see an
+    // over-capacity list, a half-trimmed list, or a score gap. Returns the assigned Redis-wide score.
+    private const string AppendScript = """
+        local score = redis.call('INCR', KEYS[2])
+        redis.call('RPUSH', KEYS[1], score .. '|' .. ARGV[1])
+        redis.call('LTRIM', KEYS[1], -tonumber(ARGV[2]), -1)
+        local ttl = tonumber(ARGV[3])
+        if ttl > 0 then
+          redis.call('PEXPIRE', KEYS[1], ttl)
+          redis.call('PEXPIRE', KEYS[2], ttl)
+        end
+        return score
+        """;
+
     private readonly IDatabase database;
     private readonly RedisKey key;
+    private readonly RedisKey sequenceKey;
     private readonly int capacity;
     private readonly TimeSpan? ttl;
 
@@ -62,6 +98,9 @@ public sealed class RedisReplayStore : IReplayStore
 
         this.database = database;
         this.key = key;
+        // The per-topic Redis-wide counter lives next to the backlog list. Keying it off the same string
+        // keeps both in the same Redis hash slot (cluster-safe for the single EVAL touching both keys).
+        sequenceKey = (RedisKey)(key.ToString() + ":seq");
         this.capacity = capacity;
         this.ttl = ttl;
     }
@@ -73,70 +112,91 @@ public sealed class RedisReplayStore : IReplayStore
     public void Append(ReplayEntry entry)
     {
         var payload = ReplayEntryCodec.Serialize(entry);
+        var ttlMilliseconds = ttl is { } expiry
+            ? (long)expiry.TotalMilliseconds
+            : 0L;
 
-        // RPUSH appends to the tail (newest last); LTRIM to the last `capacity` elements evicts the
-        // oldest beyond the bound, reproducing the in-memory ring's DropOldest semantics. Both run on
-        // the Redis server; issued back to back on the one multiplexer they preserve append-then-trim
-        // order for this key. The optional TTL is refreshed here so a still-active topic never expires
-        // while a quiet one can be reclaimed by Redis on its own.
-        database.ListRightPush(key, payload);
-        database.ListTrim(key, -capacity, -1);
-
-        if (ttl is { } expiry)
-        {
-            database.KeyExpire(key, expiry);
-        }
+        // One EVAL does INCR + RPUSH + LTRIM + (optional) EXPIRE atomically. Assigning the Redis-wide
+        // score and capping the list in the same server-side unit is what keeps the backlog totally
+        // ordered across instances AND torn-read free under concurrent appenders.
+        database.ScriptEvaluate(
+            AppendScript,
+            [key, sequenceKey],
+            [payload, capacity, ttlMilliseconds]);
     }
 
     /// <inheritdoc />
     public IReadOnlyList<ReplayEntry> GetReplay(string lastEventId)
     {
-        // Read the whole bounded backlog, oldest-first. The list is capped at `capacity`, so this is a
-        // bounded read, not an unbounded scan.
+        // Read the whole bounded backlog, oldest-first (Redis-wide score order). The list is capped at
+        // `capacity`, so this is a bounded read, not an unbounded scan.
         var stored = database.ListRange(key);
         if (stored.Length == 0)
         {
             return [];
         }
 
+        var scores = new long[stored.Length];
         var entries = new ReplayEntry[stored.Length];
         for (var i = 0; i < stored.Length; i++)
         {
-            entries[i] = ReplayEntryCodec.Deserialize(stored[i]!);
+            (scores[i], entries[i]) = Decode(stored[i]!);
         }
 
-        // Locate the resume point by matching Last-Event-ID against the EXACT wire id each retained
-        // entry emitted. The list is oldest-first, so the FIRST match is the oldest entry carrying the
-        // id: that implements the seam's duplicate-WireId contract (a reused producer id resolves to the
-        // oldest, replaying the most events and never skipping one). Hub sequences never collide, so a
-        // duplicate only arises for a reused producer id.
+        // Locate the resume point by matching Last-Event-ID against the EXACT wire id each retained entry
+        // emitted. The list is oldest-first in Redis-wide score order, so the FIRST match is the oldest
+        // entry carrying the id: that implements the seam's duplicate-WireId contract (a reused producer
+        // id resolves to the oldest, replaying the most events and never skipping one). The resume point
+        // is keyed on the REDIS-WIDE score, not the per-instance hub sequence, so the suffix is correctly
+        // ordered no matter which instance published each event.
         long? resumeAfter = null;
-        foreach (var entry in entries)
+        for (var i = 0; i < entries.Length; i++)
         {
-            if (string.Equals(entry.WireId, lastEventId, StringComparison.Ordinal))
+            if (string.Equals(entries[i].WireId, lastEventId, StringComparison.Ordinal))
             {
-                resumeAfter = entry.Sequence;
+                resumeAfter = scores[i];
                 break;
             }
         }
 
-        if (resumeAfter is not { } afterSequence)
+        if (resumeAfter is not { } afterScore)
         {
             // Unknown / evicted id: empty result is the from-now fallback, never a partial backlog.
             return [];
         }
 
-        // Replay every retained entry published AFTER the matched one, in ascending sequence order
-        // (which is list order here, since the hub appends in sequence order).
+        // Replay every retained entry whose Redis-wide score is greater than the matched one, in list
+        // order (which IS ascending Redis-wide score order).
         var replay = new List<ReplayEntry>();
-        foreach (var entry in entries)
+        for (var i = 0; i < entries.Length; i++)
         {
-            if (entry.Sequence > afterSequence)
+            if (scores[i] > afterScore)
             {
-                replay.Add(entry);
+                replay.Add(entries[i]);
             }
         }
 
         return replay;
+    }
+
+    // Split a stored "{redisScore}|{json}" element back into its Redis-wide score and the entry. Splits
+    // at the FIRST separator only: the score is a plain decimal with no separator, and the JSON suffix is
+    // passed through untouched even if it contains the separator character.
+    private static (long Score, ReplayEntry Entry) Decode(string element)
+    {
+        var split = element.IndexOf(ScoreSeparator, StringComparison.Ordinal);
+        if (split <= 0)
+        {
+            throw new FormatException("A stored OrionStream replay element was missing its Redis-wide order prefix.");
+        }
+
+        var scoreText = element.AsSpan(0, split);
+        if (!long.TryParse(scoreText, NumberStyles.None, CultureInfo.InvariantCulture, out var score))
+        {
+            throw new FormatException("A stored OrionStream replay element had an unparsable Redis-wide order prefix.");
+        }
+
+        var entry = ReplayEntryCodec.Deserialize(element[(split + 1)..]);
+        return (score, entry);
     }
 }

@@ -176,4 +176,102 @@ public sealed class RedisReplayStoreTests : IClassFixture<RedisContainerFixture>
         Assert.True(afterRestart.HasBacklog);
         Assert.Equal("b", Datas(afterRestart.GetReplay("1")));
     }
+
+    [Fact]
+    public void Two_instances_on_the_same_topic_share_one_consistent_redis_wide_order()
+    {
+        var topic = NewTopic();
+
+        // Two store instances model two hub PROCESSES publishing to the same topic. Each hub allocates
+        // its OWN per-instance sequence, so the ReplayEntry.Sequence values COLLIDE: both produce 1, 2.
+        // If the backlog ordered by that per-instance sequence, the shared list would be inconsistent.
+        // The store assigns a Redis-wide order at append, so the interleaved appends land in a single
+        // total order (the order Redis saw them), and resume keys off THAT, not the colliding sequence.
+        var instanceA = NewStore(topic, capacity: 256);
+        var instanceB = NewStore(topic, capacity: 256);
+
+        // Interleave appends from both instances. Wire ids are globally unique here (the realistic case
+        // for hub sequences is a per-instance counter, so we give each a disjoint id space a..d / e..h).
+        instanceA.Append(Entry(1, "a1", "a")); // redis order 1
+        instanceB.Append(Entry(1, "b1", "e")); // redis order 2 - same per-instance Sequence 1 as above
+        instanceA.Append(Entry(2, "a2", "b")); // redis order 3
+        instanceB.Append(Entry(2, "b2", "f")); // redis order 4 - same per-instance Sequence 2
+
+        // A third store (any instance) reads the shared backlog. Resuming from the very first append's
+        // wire id must replay the rest in the Redis-wide append order, NOT grouped or reordered by the
+        // colliding per-instance sequence.
+        var reader = NewStore(topic, capacity: 256);
+        Assert.Equal("e,b,f", Datas(reader.GetReplay("a1")));
+
+        // Resuming from an event published by instance B ("b1", Redis order 2) replays everything that
+        // landed AFTER it in Redis-wide order: instance A's "b" (order 3) and instance B's "f" (order 4).
+        // This is the crux of the cross-instance contract - "b" is included precisely because Redis saw it
+        // after "b1", even though A's per-instance Sequence (2) is meaningless relative to B's (1). A
+        // per-instance-sequence ordering could not represent "b" sitting between B's two events at all.
+        Assert.Equal("b,f", Datas(reader.GetReplay("b1")));
+    }
+
+    [Fact]
+    public async Task Concurrent_appends_never_expose_an_over_capacity_or_torn_backlog()
+    {
+        var topic = NewTopic();
+        const int capacity = 50;
+        const int appenders = 8;
+        const int perAppender = 200;
+
+        // Many instances hammer the same capped topic concurrently while a reader continuously samples
+        // the backlog. The append is one atomic Lua unit (INCR + RPUSH + LTRIM + EXPIRE), so the reader
+        // must NEVER observe more than `capacity` elements - no torn read between push and trim.
+        using var stop = new CancellationTokenSource();
+        var maxObserved = 0;
+        var readerFailure = (Exception?)null;
+
+        var reader = Task.Run(() =>
+        {
+            try
+            {
+                var db = fixture.Mux.GetDatabase();
+                var key = (RedisKey)("orionstream:replay:" + topic);
+                while (!stop.Token.IsCancellationRequested)
+                {
+                    var len = (int)db.ListLength(key);
+                    if (len > maxObserved)
+                    {
+                        maxObserved = len;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                readerFailure = ex;
+            }
+        });
+
+        var writers = Enumerable.Range(0, appenders).Select(instance => Task.Run(() =>
+        {
+            var store = NewStore(topic, capacity);
+            for (var i = 0; i < perAppender; i++)
+            {
+                var id = instance + "-" + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                store.Append(Entry(i, id, id));
+            }
+        })).ToArray();
+
+        await Task.WhenAll(writers);
+        stop.Cancel();
+        await reader;
+
+        Assert.Null(readerFailure);
+
+        // Capacity invariant: the live samples never saw an over-capacity backlog, and the final state
+        // is exactly capped.
+        Assert.True(maxObserved <= capacity, $"reader observed {maxObserved} elements, over capacity {capacity}");
+        var finalLength = (int)fixture.Mux.GetDatabase().ListLength((RedisKey)("orionstream:replay:" + topic));
+        Assert.Equal(capacity, finalLength);
+
+        // The retained suffix is still a coherent, fully parseable, Redis-wide-ordered backlog: GetReplay
+        // over it does not throw on a torn element and returns at most `capacity` entries.
+        var tail = NewStore(topic, capacity).GetReplay("does-not-exist");
+        Assert.Empty(tail); // unknown id -> from-now fallback, proving no partial/torn parse
+    }
 }
