@@ -1,6 +1,6 @@
 # OrionStream Roadmap
 
-OrionStream is at **0.5.0**: an in-process Server-Sent Events hub for ASP.NET Core, with topic
+OrionStream is at **0.6.0**: an in-process Server-Sent Events hub for ASP.NET Core, with topic
 fan-out, `Last-Event-ID` resume from a bounded per-topic replay buffer behind a pluggable
 `IReplayStore` seam, a documented event-id allocation contract, an allocation-light wire writer, a
 one-line endpoint mapping helper, typed and async-enumerable publish/consume sugar, per-topic metric
@@ -93,6 +93,16 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
   implementation and a caller can swap in an external store without the hub knowing where the backlog
   lives. `InMemoryReplayStore` stays the default and the only one with no dependencies; resume reads
   through the seam, and behavior is identical with the default store.
+- **Durable Redis backplane replay store (0.6.0).** The opt-in `OrionStream.Redis` package plugs a
+  Redis-backed `IReplayStore` into that seam, over `StackExchange.Redis`. With it registered, a client
+  can resume by `Last-Event-ID` after a load balancer reconnects it to a *different* hub instance, and
+  the backlog survives a process restart, because the backlog lives in Redis instead of an in-process
+  ring. It is scoped strictly to the resume backlog: an event published on instance A is still
+  delivered only to A's live subscribers (it is not a cross-instance publish bus). One capped Redis list
+  per topic holds entries ordered by the hub's gap-free sequence, bounded to `ReplayBufferCapacity` by
+  drop-oldest, honoring the same ordering and duplicate-WireId contract the in-memory store documents.
+  The core stays in-process fan-out with no mandatory dependency; the package is additive and the
+  in-memory ring remains the default.
 
 ---
 
@@ -101,20 +111,22 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
 These are possibilities, ordered loosely by how aligned they are with the library's purpose. None is
 committed, and the version tags are targets.
 
-### Resume and multi-instance (durable store still planned, ~Q1 2027)
+### Resume and multi-instance (Redis backplane shipped, ~Q1 2027)
 
-The event-id allocation contract and the pluggable `IReplayStore` seam shipped in 0.5.0 (see
-*Recently shipped*). What remains is the durable store that plugs into that seam.
+The event-id allocation contract and the pluggable `IReplayStore` seam shipped in 0.5.0, and the
+durable Redis backplane store that plugs into that seam shipped in 0.6.0 as the `OrionStream.Redis`
+package (see *Recently shipped*). A client can now resume by `Last-Event-ID` across instances and
+across a restart when that package is registered.
 
-- **A durable / backplane replay store (opt-in package, still planned).** A Redis- or Postgres-backed
-  `IReplayStore` behind the seam that now exists, so a client can resume by `Last-Event-ID` after
-  reconnecting to a *different* instance behind a load balancer, and so a backlog survives a process
-  restart. This will ship as a separate opt-in package, not in the core: the core hub stays in-process
-  fan-out with no mandatory dependency. It is scoped specifically to the resume backlog. It does not
-  turn the hub into a publish bus across instances; an event published on instance A is still delivered
-  only to instance A's live subscribers (see non-goals). Whether cross-instance live fan-out is worth
-  building at all is an open question to settle now that the store abstraction exists. Explicitly out
-  of the 0.5.0 release.
+- **A Postgres-backed durable replay store (opt-in package, possible).** A relational alternative to
+  the Redis store behind the same `IReplayStore` seam, for deployments that already run Postgres and
+  would rather not add Redis. Same scope as the Redis store: the resume backlog only, not a
+  cross-instance publish bus. Not committed; weighed against whether the Redis package already covers
+  the durable-resume need for most users.
+- **Cross-instance live fan-out (open question, not committed).** Whether to deliver an event published
+  on instance A to instance B's live subscribers at all, now that a shared store abstraction exists.
+  This is a deliberate non-goal today (see below); the store backplane is scoped to resume backlog
+  only. Listed here only to record the question, not as planned work.
 
 ### Hardening (targeting 0.5.0, ~Q1 2027)
 
