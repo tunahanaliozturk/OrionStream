@@ -52,7 +52,22 @@ jobs:
       - name: Build
         run: dotnet build ${{ env.SOLUTION_PATH }} --no-restore --configuration Release
       - name: Pack
-        run: dotnet pack src/Moongazing.OrionStream/Moongazing.OrionStream.csproj --no-build --configuration Release -o ./nupkgs
+        # Packs the solution rather than an enumerated list of projects. Every non-shipping
+        # project (tests, sample, benchmarks) sets IsPackable=false, so this produces exactly
+        # the src/ packages - and a newly added sub-package ships automatically instead of being
+        # silently left out of the release until someone notices it missing from NuGet.
+        run: dotnet pack ${{ env.SOLUTION_PATH }} --no-build --configuration Release -o ./nupkgs
+      - name: Verify every packable project produced a package
+        run: |
+          expected=$(find src -name '*.csproj' -exec grep -L '<IsPackable>false' {} + | wc -l)
+          actual=$(find ./nupkgs -name '*.nupkg' -not -name '*.symbols.nupkg' | wc -l)
+          echo "Packable src projects: $expected"
+          echo "Packages produced:     $actual"
+          find ./nupkgs -name '*.nupkg' -printf '  %f\n' | sort
+          if [ "$expected" -ne "$actual" ]; then
+            echo "::error::Expected $expected packages but produced $actual. Refusing to publish a partial set."
+            exit 1
+          fi
       - name: Push to NuGet.org
         run: dotnet nuget push "./nupkgs/*.nupkg" --api-key "${{ secrets.NUGET }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
       - name: Push to GitHub Packages
