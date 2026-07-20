@@ -21,6 +21,14 @@
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
       <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!--
+      Audit the whole transitive graph (not just direct references, the default), and surface
+      package-vulnerability advisories (NU1901-1904) as warnings rather than errors, so a
+      newly-disclosed upstream CVE shows up loudly without turning CI red on an external event
+      with no code change. Remove WarningsNotAsErrors to make advisories hard build errors.
+    -->
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <WarningsNotAsErrors>NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
 </PropertyGroup>
   <ItemGroup Condition="'$(IsPackable)' == 'true'">
     <None Include="$(MSBuildThisFileDirectory)docs/icon.png" Pack="true" PackagePath="\" Visible="false" />
