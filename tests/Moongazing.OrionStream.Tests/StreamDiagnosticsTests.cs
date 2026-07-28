@@ -1,5 +1,6 @@
 namespace Moongazing.OrionStream.Tests;
 
+using Moongazing.Orion.Abstractions.Diagnostics;
 using System.Collections.Generic;
 using System.Diagnostics.Metrics;
 
@@ -14,8 +15,8 @@ public sealed class StreamDiagnosticsTests
     /// <summary>
     /// Records counter and observable-gauge measurements for one specific <see cref="StreamDiagnostics"/>
     /// instance. Every instance shares the meter name, so to keep tests isolated the listener filters
-    /// to the exact <see cref="Meter"/> object owned by this diagnostics instance, obtained via
-    /// reflection over its private field (test-only).
+    /// to the exact <see cref="Meter"/> object owned by this diagnostics instance, read from the
+    /// <see cref="OrionInstrumentation.Meter"/> property the spine exposes.
     /// </summary>
     private sealed class MeterCapture : System.IDisposable
     {
