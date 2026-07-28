@@ -75,8 +75,8 @@ on reconnect, which you can read to resume.
 
 ## Telemetry
 
-Subscribe to the `Moongazing.OrionStream` meter: `orionstream.published`, `orionstream.dropped`,
-and an `orionstream.subscribers` gauge of currently connected subscribers.
+Subscribe to the `Moongazing.OrionStream` meter: `orion.stream.published`, `orion.stream.dropped`,
+and an `orion.stream.subscribers` gauge of currently connected subscribers.
 
 ## Design
 
