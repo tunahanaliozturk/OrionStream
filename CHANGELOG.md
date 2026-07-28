@@ -6,6 +6,19 @@ All notable changes to OrionStream are documented in this file. The format is ba
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-07-28
+
+### Fixed
+
+- **Trim / NativeAOT cleanliness.** The typed JSON helpers — `SseHubTypedExtensions.Publish<T>`,
+  `StreamSubscriptionAsyncEnumerableExtensions.ReadAllAsync<T>` and `PublishAllAsync<T>` — serialize
+  with reflection-based `System.Text.Json`, so a consumer publishing trimmed or AOT saw IL2026/IL3050
+  warnings originating from OrionStream. They are now annotated `[RequiresUnreferencedCode]` /
+  `[RequiresDynamicCode]` with guidance (supply a source-generated `JsonSerializerContext`, or publish
+  a pre-serialized `ServerSentEvent` via the fully AOT-clean `ISseHub.Publish`). A **NativeAOT publish
+  smoke test** was added to CI over the core broadcast path (subscribe → raw publish → channel read),
+  proving it is trim/AOT-clean. No behavior change.
+
 ## [0.6.0] - 2026-07-20
 
 ### Added
