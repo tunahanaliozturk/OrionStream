@@ -1,6 +1,7 @@
 namespace Moongazing.OrionStream.Streaming;
 
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
@@ -45,6 +46,14 @@ public static class StreamSubscriptionAsyncEnumerableExtensions
     /// </param>
     /// <param name="cancellationToken">Ends the enumeration when tripped.</param>
     /// <returns>An async stream of deserialized payloads.</returns>
+    /// <remarks>
+    /// Deserializes each event with reflection-based <see cref="JsonSerializer"/>, so it is not
+    /// trim/NativeAOT-safe out of the box. Pass a <see cref="JsonSerializerOptions"/> backed by a
+    /// source-generated <c>JsonSerializerContext</c> to stay AOT-safe, or read the raw
+    /// <see cref="ServerSentEvent"/> stream and deserialize yourself.
+    /// </remarks>
+    [RequiresUnreferencedCode("JSON deserialization uses reflection; supply a source-generated JsonSerializerContext to stay trim-safe.")]
+    [RequiresDynamicCode("JSON deserialization may require runtime code generation; supply a source-generated JsonSerializerContext to stay NativeAOT-safe.")]
     public static async IAsyncEnumerable<T?> ReadAllAsync<T>(
         this StreamSubscription subscription,
         JsonSerializerOptions? serializerOptions = null,
@@ -77,6 +86,15 @@ public static class StreamSubscriptionAsyncEnumerableExtensions
     /// <param name="eventName">The optional SSE <c>event:</c> name applied to every published item.</param>
     /// <param name="cancellationToken">Stops draining the source when tripped.</param>
     /// <returns>The number of items published.</returns>
+    /// <remarks>
+    /// Serializes each item with reflection-based <see cref="JsonSerializer"/> (via
+    /// <see cref="SseHubTypedExtensions.Publish{T}"/>), so it is not trim/NativeAOT-safe out of the
+    /// box. Pass a <see cref="JsonSerializerOptions"/> backed by a source-generated
+    /// <c>JsonSerializerContext</c> to stay AOT-safe, or publish pre-serialized
+    /// <see cref="ServerSentEvent"/>s via <see cref="ISseHub.Publish(string, ServerSentEvent)"/>.
+    /// </remarks>
+    [RequiresUnreferencedCode("JSON serialization uses reflection; supply a source-generated JsonSerializerContext, or publish pre-serialized ServerSentEvents, to stay trim-safe.")]
+    [RequiresDynamicCode("JSON serialization may require runtime code generation; supply a source-generated JsonSerializerContext, or publish pre-serialized ServerSentEvents, to stay NativeAOT-safe.")]
     public static async Task<long> PublishAllAsync<T>(
         this ISseHub hub,
         string topic,

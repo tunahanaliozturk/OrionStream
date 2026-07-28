@@ -1,5 +1,6 @@
 namespace Moongazing.OrionStream.Streaming;
 
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 
 /// <summary>
@@ -26,6 +27,15 @@ public static class SseHubTypedExtensions
     /// <param name="id">The optional producer-supplied SSE <c>id:</c>.</param>
     /// <param name="retryMilliseconds">The optional SSE <c>retry:</c> reconnection hint.</param>
     /// <returns>The number of subscribers the event was delivered to.</returns>
+    /// <remarks>
+    /// Serializes <typeparamref name="T"/> with reflection-based <see cref="JsonSerializer"/>, so it is
+    /// not trim/NativeAOT-safe out of the box. To publish under trimming or AOT, pass a
+    /// <see cref="JsonSerializerOptions"/> backed by a source-generated <c>JsonSerializerContext</c>, or
+    /// serialize yourself and publish the raw <see cref="ServerSentEvent"/> via
+    /// <see cref="ISseHub.Publish(string, ServerSentEvent)"/> (which is fully AOT-clean).
+    /// </remarks>
+    [RequiresUnreferencedCode("JSON serialization of the payload uses reflection; supply a source-generated JsonSerializerContext, or publish a pre-serialized ServerSentEvent via ISseHub.Publish, to stay trim-safe.")]
+    [RequiresDynamicCode("JSON serialization of the payload may require runtime code generation; supply a source-generated JsonSerializerContext, or publish a pre-serialized ServerSentEvent via ISseHub.Publish, to stay NativeAOT-safe.")]
     public static int Publish<T>(
         this ISseHub hub,
         string topic,
