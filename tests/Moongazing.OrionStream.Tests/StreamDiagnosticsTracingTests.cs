@@ -68,14 +68,9 @@ public sealed class StreamDiagnosticsTracingTests
             }
         }
 
-        private static Meter OwnerMeterOf(StreamDiagnostics owner)
-        {
-            var field = typeof(StreamDiagnostics).GetField(
-                "meter",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-            Assert.NotNull(field);
-            return (Meter)field!.GetValue(owner)!;
-        }
+        // The OrionInstrumentation spine exposes the meter as a public property, so scope the
+        // listener to this instance's meter directly instead of reflecting a private field.
+        private static Meter OwnerMeterOf(StreamDiagnostics owner) => owner.Meter;
 
         public void Dispose() => listener.Dispose();
     }
@@ -120,7 +115,7 @@ public sealed class StreamDiagnosticsTracingTests
 
         hub.Publish("orders", new ServerSentEvent { Data = "x" });
 
-        var published = capture.ForInstrument("orionstream.published");
+        var published = capture.ForInstrument("orion.stream.published");
         Assert.Single(published);
         Assert.Equal("orders", published[0].Topic);
         Assert.Equal(1, published[0].Value);
@@ -137,7 +132,7 @@ public sealed class StreamDiagnosticsTracingTests
         hub.Publish("orders", new ServerSentEvent { Data = "1" }); // fills buffer
         hub.Publish("orders", new ServerSentEvent { Data = "2" }); // evicts -> one drop
 
-        var dropped = capture.ForInstrument("orionstream.dropped");
+        var dropped = capture.ForInstrument("orion.stream.dropped");
         Assert.Equal(1, dropped.Sum(m => m.Value));
         Assert.All(dropped.Where(m => m.Value > 0), m => Assert.Equal("orders", m.Topic));
     }

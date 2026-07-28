@@ -63,9 +63,10 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
   a subscription as `IAsyncEnumerable<T>` for `await foreach`, and `ISseHub.PublishAllAsync<T>` drains
   an async stream into a topic.
 - **Per-topic metric tags and a tracing `ActivitySource` (0.3.0).** `orionstream.published` and
-  `orionstream.dropped` now carry an `orionstream.topic` tag, and `StreamDiagnostics` exposes an
+  `orionstream.dropped` carried an `orionstream.topic` tag, and `StreamDiagnostics` exposes an
   `ActivitySource` named `Moongazing.OrionStream` with `OrionStream.Publish` and
-  `OrionStream.Subscribe` spans tagged with the topic.
+  `OrionStream.Subscribe` spans tagged with the topic. (In 0.7.0 these metrics were renamed to the
+  `orion.stream.*` family convention — the tag became `orion.stream.topic`.)
 - **Configurable full-buffer policy (0.4.0).** `StreamOptions.FullBufferPolicy` chooses what happens
   when a subscriber buffer is full: `DropOldest` (default, unchanged), `DropNewest`, or a bounded
   `Wait` capped by `StreamOptions.MaxPublishWait`. `Wait` is the one policy that can apply

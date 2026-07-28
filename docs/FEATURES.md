@@ -207,7 +207,7 @@ override, below). What happens when that buffer is full at publish time is set b
 | `Wait` | Wait for room up to `MaxPublishWait`, then give up on that subscriber. | Yes, up to the cap |
 
 - A slow subscriber under either drop policy affects only its own stream, never the producer or other
-  subscribers, and the loss is recorded as `orionstream.dropped`.
+  subscribers, and the loss is recorded as `orion.stream.dropped`.
 - `Wait` is the only policy that applies back-pressure to the publisher. It requires an explicit
   `MaxPublishWait` cap (validated at registration) so a wedged reader cannot stall `Publish` forever:
   the call returns the instant room appears, or after the cap drops the event for that subscriber and
@@ -376,11 +376,11 @@ rather than at first use.
 
 | Instrument | Kind | Unit | Meaning |
 | --- | --- | --- | --- |
-| `orionstream.published` | Counter | `{event}` | Events published, counted once per publish. Tagged with `orionstream.topic`. |
-| `orionstream.dropped` | Counter | `{event}` | Events dropped on a full subscriber buffer. Tagged with `orionstream.topic`. |
-| `orionstream.subscribers` | Observable gauge | `{subscriber}` | Currently connected subscribers across all topics. |
+| `orion.stream.published` | Counter | `{event}` | Events published, counted once per publish. Tagged with `orion.stream.topic`. |
+| `orion.stream.dropped` | Counter | `{event}` | Events dropped on a full subscriber buffer. Tagged with `orion.stream.topic`. |
+| `orion.stream.subscribers` | Observable gauge | `{subscriber}` | Currently connected subscribers across all topics. |
 
-The `orionstream.topic` tag (`StreamDiagnostics.TopicTagName`) lets the published and dropped counters
+The `orion.stream.topic` tag (`StreamDiagnostics.TopicTagName`) lets the published and dropped counters
 be sliced per topic. The `ActivitySource` carries an `OrionStream.Publish` (producer) span and an
 `OrionStream.Subscribe` (consumer) span, each tagged with the topic; the publish span also tags the
 delivered subscriber count.
@@ -417,5 +417,7 @@ cross-instance store, still planned, ships that way as a separate opt-in package
 
 OrionStream multi-targets `net8.0`, `net9.0`, and `net10.0`. Nullable reference types are enabled,
 analyzers run at `latest-recommended`, warnings are treated as errors, and an XML documentation file
-is generated. The package carries a `FrameworkReference` to `Microsoft.AspNetCore.App`.
+is generated. The package carries a `FrameworkReference` to `Microsoft.AspNetCore.App` and a package
+reference to `Orion.Abstractions` (the family's shared contracts spine, which supplies the
+`OrionInstrumentation` telemetry base).
 </content>

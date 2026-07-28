@@ -1,5 +1,6 @@
 namespace Moongazing.OrionStream.Tests;
 
+using Moongazing.Orion.Abstractions.Diagnostics;
 using System.Collections.Generic;
 using System.Diagnostics.Metrics;
 
@@ -14,8 +15,8 @@ public sealed class StreamDiagnosticsTests
     /// <summary>
     /// Records counter and observable-gauge measurements for one specific <see cref="StreamDiagnostics"/>
     /// instance. Every instance shares the meter name, so to keep tests isolated the listener filters
-    /// to the exact <see cref="Meter"/> object owned by this diagnostics instance, obtained via
-    /// reflection over its private field (test-only).
+    /// to the exact <see cref="Meter"/> object owned by this diagnostics instance, read from the
+    /// <see cref="OrionInstrumentation.Meter"/> property the spine exposes.
     /// </summary>
     private sealed class MeterCapture : System.IDisposable
     {
@@ -60,14 +61,9 @@ public sealed class StreamDiagnosticsTests
             }
         }
 
-        private static Meter OwnerMeterOf(StreamDiagnostics owner)
-        {
-            var field = typeof(StreamDiagnostics).GetField(
-                "meter",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-            Assert.NotNull(field);
-            return (Meter)field!.GetValue(owner)!;
-        }
+        // The OrionInstrumentation spine exposes the meter as a public property, so scope the
+        // listener to this instance's meter directly instead of reflecting a private field.
+        private static Meter OwnerMeterOf(StreamDiagnostics owner) => owner.Meter;
 
         public long Counter(string name)
         {
@@ -125,7 +121,7 @@ public sealed class StreamDiagnosticsTests
         hub.Publish("orders", new ServerSentEvent { Data = "y" });
 
         // Two subscribers but two publishes: published is counted per-publish, not per-delivery.
-        Assert.Equal(2, capture.Counter("orionstream.published"));
+        Assert.Equal(2, capture.Counter("orion.stream.published"));
     }
 
     [Fact]
@@ -137,8 +133,8 @@ public sealed class StreamDiagnosticsTests
 
         hub.Publish("nobody", new ServerSentEvent { Data = "x" });
 
-        Assert.Equal(1, capture.Counter("orionstream.published"));
-        Assert.Equal(0, capture.Counter("orionstream.dropped"));
+        Assert.Equal(1, capture.Counter("orion.stream.published"));
+        Assert.Equal(0, capture.Counter("orion.stream.dropped"));
     }
 
     [Fact]
@@ -153,8 +149,8 @@ public sealed class StreamDiagnosticsTests
         hub.Publish("orders", new ServerSentEvent { Data = "2" }); // buffer now full
         hub.Publish("orders", new ServerSentEvent { Data = "3" }); // evicts oldest -> 1 drop
 
-        Assert.Equal(1, capture.Counter("orionstream.dropped"));
-        Assert.Equal(3, capture.Counter("orionstream.published"));
+        Assert.Equal(1, capture.Counter("orion.stream.dropped"));
+        Assert.Equal(3, capture.Counter("orion.stream.published"));
     }
 
     [Fact]
@@ -170,7 +166,7 @@ public sealed class StreamDiagnosticsTests
             hub.Publish("orders", new ServerSentEvent { Data = "x" });
         }
 
-        Assert.Equal(0, capture.Counter("orionstream.dropped"));
+        Assert.Equal(0, capture.Counter("orion.stream.dropped"));
     }
 
     [Fact]
@@ -180,17 +176,17 @@ public sealed class StreamDiagnosticsTests
         using var capture = new MeterCapture(diag);
         var hub = new SseHub(new StreamOptions(), diag);
 
-        Assert.Equal(0, capture.ObserveGauge("orionstream.subscribers"));
+        Assert.Equal(0, capture.ObserveGauge("orion.stream.subscribers"));
 
         var a = hub.Subscribe("orders");
         var b = hub.Subscribe("invoices");
-        Assert.Equal(2, capture.ObserveGauge("orionstream.subscribers"));
+        Assert.Equal(2, capture.ObserveGauge("orion.stream.subscribers"));
 
         a.Dispose();
-        Assert.Equal(1, capture.ObserveGauge("orionstream.subscribers"));
+        Assert.Equal(1, capture.ObserveGauge("orion.stream.subscribers"));
 
         b.Dispose();
-        Assert.Equal(0, capture.ObserveGauge("orionstream.subscribers"));
+        Assert.Equal(0, capture.ObserveGauge("orion.stream.subscribers"));
     }
 
     [Fact]
@@ -203,6 +199,6 @@ public sealed class StreamDiagnosticsTests
         diag.IncrementSubscribers();
         diag.DecrementSubscribers();
 
-        Assert.Equal(1, capture.ObserveGauge("orionstream.subscribers"));
+        Assert.Equal(1, capture.ObserveGauge("orion.stream.subscribers"));
     }
 }

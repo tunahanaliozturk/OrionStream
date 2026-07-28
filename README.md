@@ -159,7 +159,7 @@ Each subscriber gets a bounded channel sized to `SubscriberCapacity`, created wi
 `BoundedChannelFullMode.DropOldest`. The consequence is that `Publish` is non-blocking by
 construction: a slow reader can never stall the producer or the other subscribers. When a
 subscriber's buffer is already full at publish time, its oldest buffered event is evicted to make
-room for the newest, and that eviction is counted in telemetry (`orionstream.dropped`).
+room for the newest, and that eviction is counted in telemetry (`orion.stream.dropped`).
 
 ```csharp
 // With SubscriberCapacity = 2 and a reader that has not drained:
@@ -333,11 +333,11 @@ after the call: `StreamOptions`, `StreamDiagnostics`, `IReplayStoreFactory` (def
 
 | Instrument | Kind | Unit | Meaning |
 | --- | --- | --- | --- |
-| `orionstream.published` | Counter | `{event}` | Events published to the hub, counted once per publish (not per subscriber). Tagged with `orionstream.topic`. |
-| `orionstream.dropped` | Counter | `{event}` | Events dropped because a subscriber buffer was full at publish time. Tagged with `orionstream.topic`. |
-| `orionstream.subscribers` | Observable gauge | `{subscriber}` | Currently connected subscribers across all topics. |
+| `orion.stream.published` | Counter | `{event}` | Events published to the hub, counted once per publish (not per subscriber). Tagged with `orion.stream.topic`. |
+| `orion.stream.dropped` | Counter | `{event}` | Events dropped because a subscriber buffer was full at publish time. Tagged with `orion.stream.topic`. |
+| `orion.stream.subscribers` | Observable gauge | `{subscriber}` | Currently connected subscribers across all topics. |
 
-The `orionstream.topic` tag (`StreamDiagnostics.TopicTagName`) slices the published and dropped
+The `orion.stream.topic` tag (`StreamDiagnostics.TopicTagName`) slices the published and dropped
 counters per topic. `StreamDiagnostics` also exposes an `ActivitySource` named `Moongazing.OrionStream`
 with an `OrionStream.Publish` span and an `OrionStream.Subscribe` span, each tagged with the topic.
 
@@ -347,7 +347,7 @@ builder.Services.AddOpenTelemetry()
     .WithTracing(t => t.AddSource(StreamDiagnostics.MeterName));
 ```
 
-A steadily climbing `orionstream.dropped` is the signal that subscribers cannot keep up: raise
+A steadily climbing `orion.stream.dropped` is the signal that subscribers cannot keep up: raise
 `SubscriberCapacity`, reduce publish volume, or shrink per-event payloads.
 
 ---
@@ -403,7 +403,7 @@ dotnet run -c Release --project benchmarks/Moongazing.OrionStream.Benchmarks -- 
 
 ## Versioning
 
-OrionStream is at **0.6.1**. While it is pre-1.0 the public API may still change between minor
+OrionStream is at **0.7.0**. While it is pre-1.0 the public API may still change between minor
 versions; once it reaches 1.0 it will follow [SemVer 2.0.0](https://semver.org/). See
 [CHANGELOG.md](CHANGELOG.md) for the per-release history.
 

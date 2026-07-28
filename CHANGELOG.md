@@ -6,6 +6,31 @@ All notable changes to OrionStream are documented in this file. The format is ba
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-28
+
+### Changed
+
+- **Converged the OpenTelemetry instrumentation onto the frozen `Orion.Abstractions` 1.0 spine.**
+  `StreamDiagnostics` now derives from `OrionInstrumentation` and names its metrics through
+  `OrionTelemetry`, so OrionStream shares the family's naming and static-tag conventions. Multi-tenant
+  / multi-region labels set via `OrionInstrumentation.SetStaticTags` are stamped onto every
+  measurement, and the meter and activity-source versions now track the package version (they were
+  pinned at a stale `0.4.0` literal). References `Orion.Abstractions` 1.0.0.
+
+  **Breaking (telemetry only): metric and tag names changed.** The meter / activity-source name is
+  unchanged (`Moongazing.OrionStream` — subscribers keep working). Update dashboards/alerts:
+
+  | Before | After |
+  | --- | --- |
+  | `orionstream.published` | `orion.stream.published` |
+  | `orionstream.dropped` | `orion.stream.dropped` |
+  | `orionstream.subscribers` | `orion.stream.subscribers` |
+  | topic tag `orionstream.topic` | `orion.stream.topic` |
+
+  `StreamDiagnostics.TopicTagName` still names the topic tag (its value changed to
+  `orion.stream.topic`), and the public `Published` / `Dropped` instruments, the span names, and the
+  `MeterName` constant are unchanged.
+
 ## [0.6.1] - 2026-07-28
 
 ### Fixed
@@ -240,6 +265,8 @@ Initial release. Server-Sent Events for ASP.NET Core.
 16 tests across the formatter, the hub (fan-out, topic isolation, unsubscribe, drop-oldest,
 double-dispose), the response writer, and registration.
 
+[0.7.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.7.0
+[0.6.1]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.6.1
 [0.6.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.6.0
 [0.5.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tunahanaliozturk/OrionStream/releases/tag/v0.4.0
