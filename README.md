@@ -73,6 +73,12 @@ The package id is `OrionStream`; the root namespace is `Moongazing.OrionStream`.
 `FrameworkReference` to `Microsoft.AspNetCore.App`, so add it to a project that targets the ASP.NET
 Core shared framework.
 
+For a durable, cross-instance replay backlog, also add the Redis-backed store:
+
+```bash
+dotnet add package OrionStream.Redis
+```
+
 ---
 
 ## Quick start
@@ -244,9 +250,10 @@ comparable across the two kinds. See [docs/FEATURES.md](docs/FEATURES.md) for th
 The per-topic backlog lives behind the `IReplayStore` seam, so the in-memory ring is one
 implementation and you can swap in an external store without the hub knowing where the backlog lives:
 register your own `IReplayStoreFactory` before `AddOrionStream`. `InMemoryReplayStore` is the default
-and the only one with no dependencies. A durable, cross-instance store (resume after reconnecting to a
-different instance, backlog surviving a restart) is still planned and will ship as a separate opt-in
-package behind this same seam.
+and the only one with no dependencies. For a durable, cross-instance store (resume after reconnecting
+to a different instance, backlog surviving a restart), install the **`OrionStream.Redis`** package and
+call `AddOrionStreamRedisReplayStore(...)`, which plugs a StackExchange.Redis-backed store in behind
+this same seam.
 
 ### The formatter
 
@@ -396,7 +403,7 @@ dotnet run -c Release --project benchmarks/Moongazing.OrionStream.Benchmarks -- 
 
 ## Versioning
 
-OrionStream is at **0.2.0**. While it is pre-1.0 the public API may still change between minor
+OrionStream is at **0.6.1**. While it is pre-1.0 the public API may still change between minor
 versions; once it reaches 1.0 it will follow [SemVer 2.0.0](https://semver.org/). See
 [CHANGELOG.md](CHANGELOG.md) for the per-release history.
 
@@ -406,6 +413,30 @@ versions; once it reaches 1.0 it will follow [SemVer 2.0.0](https://semver.org/)
 
 Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [Code of Conduct](CODE_OF_CONDUCT.md) before opening one.
+
+## More from the Orion family
+
+Focused .NET libraries built to one quality bar. Each is usable on its own; several share the small [`Orion.Abstractions`](https://github.com/tunahanaliozturk/Orion.Abstractions) contracts spine, but there is no deep dependency web — pick only what you need:
+
+- [OrionGuard](https://github.com/tunahanaliozturk/OrionGuard) — validation, guard clauses, DDD primitives, domain events
+- [Orion.Abstractions](https://github.com/tunahanaliozturk/Orion.Abstractions) — the shared contracts spine: telemetry, options, result, clock
+- [OrionAudit](https://github.com/tunahanaliozturk/OrionAudit) — automatic EF Core change-audit trail
+- [OrionBeacon](https://github.com/tunahanaliozturk/OrionBeacon) — leader election with fencing tokens
+- [OrionClock](https://github.com/tunahanaliozturk/OrionClock) — testable time, TTLs, and deadlines
+- [OrionGrant](https://github.com/tunahanaliozturk/OrionGrant) — permission / authorization checks
+- [OrionKey](https://github.com/tunahanaliozturk/OrionKey) — source-generated strongly-typed IDs
+- [OrionLedger](https://github.com/tunahanaliozturk/OrionLedger) — API-key issuance, verification, and rotation
+- [OrionLens](https://github.com/tunahanaliozturk/OrionLens) — ambient correlation-context propagation
+- [OrionLock](https://github.com/tunahanaliozturk/OrionLock) — distributed locks with fencing tokens
+- [OrionOnce](https://github.com/tunahanaliozturk/OrionOnce) — idempotency keys for exactly-once request handling
+- [OrionPatch](https://github.com/tunahanaliozturk/OrionPatch) — transactional outbox for EF Core
+- [OrionRelay](https://github.com/tunahanaliozturk/OrionRelay) — outbound webhook delivery (HMAC, retries, backoff)
+- [OrionResult](https://github.com/tunahanaliozturk/OrionResult) — Result/Option types and a shared error vocabulary
+- [OrionSaga](https://github.com/tunahanaliozturk/OrionSaga) — sagas / process managers for long-running workflows
+- [OrionShade](https://github.com/tunahanaliozturk/OrionShade) — sensitive-data redaction for logs and telemetry
+- [OrionVault](https://github.com/tunahanaliozturk/OrionVault) — field-level encryption for EF Core
+
+See it all working together in [OrionShowcase](https://github.com/tunahanaliozturk/OrionShowcase), a production-shaped banking sample.
 
 ## License
 
