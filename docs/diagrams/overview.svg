@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="616" viewBox="0 0 1200 616">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-fail" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: "Segoe UI", Inter, "Helvetica Neue", Arial, sans-serif; fill: #1e1b4b; }
+    .title { font-size: 24px; font-weight: 700; }
+    .subtitle { font-size: 14px; fill: #475569; }
+    .label { font-size: 15px; font-weight: 600; }
+    .small { font-size: 12.5px; fill: #475569; }
+    .code { font-family: "Cascadia Code", Consolas, "SF Mono", monospace; font-size: 13px; fill: #3730a3; }
+    .edge { font-size: 12.5px; fill: #334155; }
+    .step { fill: #eef2ff; stroke: #4f46e5; stroke-width: 2; }
+    .ext { fill: #f0f9ff; stroke: #0284c7; stroke-width: 2; }
+    .ok { fill: #ecfdf5; stroke: #059669; stroke-width: 2; }
+    .fail { fill: #fef2f2; stroke: #dc2626; stroke-width: 2; }
+    .decision { fill: #fffbeb; stroke: #d97706; stroke-width: 2; }
+    .note { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .lane { stroke: #cbd5e1; stroke-width: 1.5; stroke-dasharray: 6 5; }
+    .flow { fill: none; stroke: #64748b; stroke-width: 2; marker-end: url(#arrow); }
+    .flow.alt { stroke: #dc2626; stroke-dasharray: 6 4; marker-end: url(#arrow-fail); }
+    .flow.back { stroke-dasharray: 6 4; }
+    .badge { fill: #4f46e5; }
+    .badge-text { font-size: 12px; font-weight: 700; fill: #ffffff; }
+  </style>
+
+  <rect width="1200" height="616" fill="#ffffff"/>
+
+  <text class="title" x="40" y="52">OrionStream - where it sits</text>
+  <text class="subtitle" x="40" y="78">Publish once to a topic; every subscriber drains its own bounded buffer to a browser EventSource.</text>
+
+  <!-- row 1 -->
+  <rect class="step" x="40" y="120" width="320" height="80" rx="14"/>
+  <text class="label" x="200" y="148" text-anchor="middle">Your code</text>
+  <text class="code" x="200" y="171" text-anchor="middle">hub.Publish(topic, evt)</text>
+  <text class="small" x="200" y="190" text-anchor="middle">or the typed Publish&lt;T&gt;(topic, payload)</text>
+
+  <path class="flow" d="M360,160 L418,160"/>
+  <text class="edge" x="389" y="150" text-anchor="middle">Publish</text>
+
+  <rect class="step" x="420" y="110" width="360" height="100" rx="14"/>
+  <text class="label" x="600" y="139" text-anchor="middle">SseHub : ISseHub (singleton)</text>
+  <text class="small" x="600" y="161" text-anchor="middle">per topic: sequence, subscribers, replay store</text>
+  <text class="code" x="600" y="186" text-anchor="middle">Subscribe / Publish / SubscriberCount</text>
+
+  <path class="flow" d="M780,160 L878,160"/>
+  <text class="edge" x="829" y="150" text-anchor="middle">fan-out</text>
+
+  <rect class="step" x="880" y="120" width="280" height="80" rx="14"/>
+  <text class="label" x="1020" y="149" text-anchor="middle">Subscriber buffer</text>
+  <text class="small" x="1020" y="170" text-anchor="middle">one bounded channel each</text>
+  <text class="small" x="1020" y="188" text-anchor="middle">SubscriberCapacity, FullBufferPolicy</text>
+
+  <!-- row 2 -->
+  <path class="flow" d="M1020,200 L1020,258"/>
+  <text class="code" x="1028" y="234">Reader</text>
+
+  <rect class="step" x="880" y="260" width="280" height="80" rx="14"/>
+  <text class="label" x="1020" y="286" text-anchor="middle">SSE endpoint</text>
+  <text class="code" x="1020" y="308" text-anchor="middle">MapServerSentEvents</text>
+  <text class="code" x="1020" y="327" text-anchor="middle">WriteStreamAsync</text>
+
+  <path class="flow" d="M880,300 L750,300 L750,212"/>
+  <text class="code" x="815" y="291" text-anchor="middle">Subscribe</text>
+  <text class="small" x="815" y="318" text-anchor="middle">+ Last-Event-ID</text>
+
+  <rect class="note" x="40" y="250" width="320" height="130" rx="12"/>
+  <text class="label" x="60" y="278">OrionStream</text>
+  <text class="code" x="60" y="303">services.AddOrionStream(...)</text>
+  <text class="code" x="60" y="325">app.MapServerSentEvents(...)</text>
+  <text class="small" x="60" y="349">hub, formatter, writer, in-memory replay</text>
+  <text class="small" x="60" y="368">meter + traces: Moongazing.OrionStream</text>
+
+  <!-- row 3: replay stores -->
+  <path class="flow" d="M505,210 L505,398"/>
+  <path class="flow" d="M695,210 L695,398"/>
+  <text class="edge" x="600" y="330" text-anchor="middle">Append / GetReplay</text>
+  <text class="small" x="600" y="348" text-anchor="middle">via IReplayStoreFactory</text>
+  <text class="small" x="600" y="366" text-anchor="middle">(one of)</text>
+
+  <rect class="step" x="420" y="400" width="170" height="80" rx="14"/>
+  <text class="label" x="505" y="430" text-anchor="middle">InMemoryReplayStore</text>
+  <text class="small" x="505" y="451" text-anchor="middle">default, in-process ring</text>
+  <text class="small" x="505" y="469" text-anchor="middle">OrionStream</text>
+
+  <rect class="step" x="610" y="400" width="170" height="80" rx="14"/>
+  <text class="label" x="695" y="430" text-anchor="middle">RedisReplayStore</text>
+  <text class="small" x="695" y="451" text-anchor="middle">opt-in package</text>
+  <text class="small" x="695" y="469" text-anchor="middle">OrionStream.Redis</text>
+
+  <path class="flow" d="M695,480 L695,528"/>
+  <rect class="ext" x="610" y="530" width="170" height="56" rx="14"/>
+  <text class="label" x="695" y="555" text-anchor="middle">Redis</text>
+  <text class="small" x="695" y="574" text-anchor="middle">one list per topic</text>
+
+  <rect class="note" x="40" y="400" width="320" height="96" rx="12"/>
+  <text class="label" x="60" y="428">OrionStream.Redis</text>
+  <text class="code" x="60" y="453">AddOrionStreamRedisReplayStore(...)</text>
+  <text class="small" x="60" y="477">replaces IReplayStoreFactory</text>
+
+  <!-- browser -->
+  <path class="flow" d="M990,340 L990,398"/>
+  <text class="small" x="982" y="374" text-anchor="end">events, heartbeats</text>
+  <path class="flow back" d="M1080,400 L1080,342"/>
+  <text class="small" x="1088" y="366">reconnect +</text>
+  <text class="small" x="1088" y="383">Last-Event-ID</text>
+
+  <rect class="ext" x="880" y="400" width="280" height="80" rx="14"/>
+  <text class="label" x="1020" y="432" text-anchor="middle">Browser EventSource</text>
+  <text class="small" x="1020" y="454" text-anchor="middle">text/event-stream, auto-reconnect</text>
+
+  <rect class="note" x="880" y="520" width="280" height="66" rx="10"/>
+  <text class="small" x="896" y="547">Live events reach only this instance's</text>
+  <text class="small" x="896" y="567">subscribers; Redis keeps the backlog.</text>
+</svg>

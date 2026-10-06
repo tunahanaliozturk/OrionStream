@@ -60,12 +60,14 @@ in-memory ring stays the default, and nothing moves to Redis unless the new regi
   event published on instance A is still delivered only to A's live subscribers; Redis is read on resume
   to rebuild what a reconnecting client missed, not to fan out live events between instances.
 - Redis structure: one capped list per topic, keyed `{KeyPrefix}{topic}` (default prefix
-  `orionstream:replay:`), holding JSON-encoded entries oldest first. Each append is an `RPUSH` then an
-  `LTRIM` that keeps the newest `capacity` entries, matching the `ReplayBufferCapacity`
-  drop-oldest-beyond-capacity bound. Entries are ordered by the hub's gap-free per-topic sequence;
-  resume matches the returning `Last-Event-ID` against the exact wire id each entry emitted, resolves a
-  duplicate id to the oldest matching entry, and replays the ascending suffix after it: the same
-  ordering and duplicate-WireId contract the in-memory store documents.
+  `orionstream:replay:`), holding JSON-encoded entries oldest first. Each append is one Lua script
+  (`EVAL`) that increments a per-topic Redis counter (`{key}:seq`), `RPUSH`es the entry prefixed with
+  that counter, and `LTRIM`s to the newest `capacity` entries, matching the `ReplayBufferCapacity`
+  drop-oldest-beyond-capacity bound. Entries are ordered by that Redis-wide counter; resume matches the
+  returning `Last-Event-ID` against the exact wire id each entry emitted, resolves a duplicate id to
+  the oldest matching entry, and replays the suffix after it: the same duplicate-WireId contract the
+  in-memory store documents. (Corrected in the docs: this entry first said the list was ordered by the
+  hub's per-topic sequence and appended with a separate `RPUSH` and `LTRIM`.)
 - Registration: `AddOrionStreamRedisReplayStore(connectionString, configure?)` (registers a shared
   `IConnectionMultiplexer` and swaps the factory) or `AddOrionStreamRedisReplayStore(configure?)` over
   an already-registered multiplexer. The Redis factory replaces the in-memory default definitively, so

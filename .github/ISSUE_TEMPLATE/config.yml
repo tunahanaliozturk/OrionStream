@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/tunahanaliozturk/OrionStream#readme
+    about: The README and docs/FEATURES.md document the real behaviour of OrionStream and OrionStream.Redis. Read them before asking "how do I ...".
+  - name: Roadmap
+    url: https://github.com/tunahanaliozturk/OrionStream/blob/main/docs/ROADMAP.md
+    about: What is being considered. To ask for a roadmap item, open a feature request that names it.
+  - name: Security vulnerability
+    url: https://github.com/tunahanaliozturk/OrionStream/blob/main/SECURITY.md
+    about: Do not file a public issue. Report it privately as described in SECURITY.md.

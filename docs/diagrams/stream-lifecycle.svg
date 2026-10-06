@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="964" viewBox="0 0 1200 964">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-fail" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: "Segoe UI", Inter, "Helvetica Neue", Arial, sans-serif; fill: #1e1b4b; }
+    .title { font-size: 24px; font-weight: 700; }
+    .subtitle { font-size: 14px; fill: #475569; }
+    .label { font-size: 15px; font-weight: 600; }
+    .small { font-size: 12.5px; fill: #475569; }
+    .code { font-family: "Cascadia Code", Consolas, "SF Mono", monospace; font-size: 13px; fill: #3730a3; }
+    .edge { font-size: 12.5px; fill: #334155; }
+    .step { fill: #eef2ff; stroke: #4f46e5; stroke-width: 2; }
+    .ext { fill: #f0f9ff; stroke: #0284c7; stroke-width: 2; }
+    .ok { fill: #ecfdf5; stroke: #059669; stroke-width: 2; }
+    .fail { fill: #fef2f2; stroke: #dc2626; stroke-width: 2; }
+    .decision { fill: #fffbeb; stroke: #d97706; stroke-width: 2; }
+    .note { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .lane { stroke: #cbd5e1; stroke-width: 1.5; stroke-dasharray: 6 5; }
+    .flow { fill: none; stroke: #64748b; stroke-width: 2; marker-end: url(#arrow); }
+    .flow.alt { stroke: #dc2626; stroke-dasharray: 6 4; marker-end: url(#arrow-fail); }
+    .flow.back { stroke-dasharray: 6 4; }
+    .badge { fill: #4f46e5; }
+    .badge-text { font-size: 12px; font-weight: 700; fill: #ffffff; }
+  </style>
+
+  <rect width="1200" height="964" fill="#ffffff"/>
+
+  <text class="title" x="40" y="52">OrionStream - one SSE connection</text>
+  <text class="subtitle" x="40" y="78">Subscribe, stream until the client leaves or the hub completes the subscription, then dispose.</text>
+
+  <rect class="ext" x="320" y="100" width="300" height="60" rx="14"/>
+  <text class="label" x="470" y="126" text-anchor="middle">Browser EventSource</text>
+  <text class="code" x="470" y="148" text-anchor="middle">GET /events/orders</text>
+
+  <path class="flow" d="M470,160 L470,198"/>
+  <text class="small" x="484" y="184">Last-Event-ID header (on reconnect)</text>
+
+  <rect class="step" x="320" y="200" width="300" height="60" rx="14"/>
+  <text class="code" x="470" y="226" text-anchor="middle">MapServerSentEvents</text>
+  <text class="small" x="470" y="248" text-anchor="middle">selects the topic, reads Last-Event-ID</text>
+
+  <path class="flow" d="M470,260 L470,288"/>
+  <polygon class="decision" points="470,290 580,330 470,370 360,330"/>
+  <text class="label" x="470" y="335" text-anchor="middle">Topic empty?</text>
+  <path class="flow alt" d="M360,330 L212,330"/>
+  <text class="edge" x="286" y="320" text-anchor="middle">yes</text>
+  <rect class="fail" x="40" y="300" width="170" height="60" rx="14"/>
+  <text class="label" x="125" y="327" text-anchor="middle">400 Bad Request</text>
+  <text class="small" x="125" y="347" text-anchor="middle">nothing subscribed</text>
+
+  <path class="flow" d="M470,370 L470,398"/>
+  <text class="edge" x="484" y="390">no</text>
+  <rect class="step" x="320" y="400" width="300" height="80" rx="14"/>
+  <text class="code" x="470" y="425" text-anchor="middle">hub.Subscribe(topic, lastEventId)</text>
+  <text class="small" x="470" y="447" text-anchor="middle">matched id: replays the backlog after it</text>
+  <text class="small" x="470" y="466" text-anchor="middle">otherwise: starts from now</text>
+  <path class="flow alt" d="M320,440 L212,440"/>
+  <rect class="fail" x="40" y="410" width="170" height="60" rx="14"/>
+  <text class="label" x="125" y="436" text-anchor="middle">Subscribe throws</text>
+  <text class="small" x="125" y="456" text-anchor="middle">replay store error</text>
+
+  <rect class="note" x="680" y="408" width="330" height="64" rx="10"/>
+  <text class="small" x="696" y="434">Subscribe: orion.stream.subscribers +1</text>
+  <text class="small" x="696" y="454">dispose or slow-consumer disconnect: -1</text>
+
+  <path class="flow" d="M470,480 L470,518"/>
+  <rect class="step" x="320" y="520" width="300" height="60" rx="14"/>
+  <text class="code" x="470" y="546" text-anchor="middle">WriteStreamAsync</text>
+  <text class="small" x="470" y="567" text-anchor="middle">SSE headers, flush, then loop</text>
+
+  <path class="flow" d="M470,580 L470,608"/>
+  <polygon class="decision" points="470,610 600,660 470,710 340,660"/>
+  <text class="label" x="470" y="655" text-anchor="middle">Wait</text>
+  <text class="small" x="470" y="674" text-anchor="middle">event, idle timeout or cancel</text>
+
+  <!-- loop branches -->
+  <path class="flow" d="M600,660 L650,660 L650,620 L698,620"/>
+  <path class="flow" d="M650,660 L650,700 L698,700"/>
+  <text class="edge" x="674" y="612" text-anchor="middle">event</text>
+  <text class="edge" x="674" y="692" text-anchor="middle">idle</text>
+  <rect class="step" x="700" y="590" width="230" height="60" rx="14"/>
+  <text class="label" x="815" y="615" text-anchor="middle">Write events</text>
+  <text class="small" x="815" y="635" text-anchor="middle">Format, write, flush each</text>
+  <rect class="step" x="700" y="670" width="230" height="60" rx="14"/>
+  <text class="label" x="815" y="695" text-anchor="middle">Write heartbeat</text>
+  <text class="code" x="815" y="716" text-anchor="middle">": heartbeat"</text>
+  <path class="flow back" style="marker-end: none" d="M930,700 L970,700 L970,620"/>
+  <path class="flow back" d="M930,620 L970,620 L970,550 L622,550"/>
+  <text class="edge" x="978" y="590">loop</text>
+
+  <!-- exits -->
+  <path class="flow alt" d="M340,660 L212,660"/>
+  <text class="edge" x="276" y="650" text-anchor="middle">cancel</text>
+  <rect class="step" x="40" y="620" width="170" height="80" rx="14"/>
+  <text class="label" x="125" y="646" text-anchor="middle">Client left</text>
+  <text class="code" x="125" y="667" text-anchor="middle">RequestAborted</text>
+  <text class="small" x="125" y="687" text-anchor="middle">cancellation swallowed</text>
+  <path class="flow" d="M125,700 L125,788 L318,788"/>
+
+  <path class="flow alt" d="M470,710 L470,758"/>
+  <text class="edge" x="484" y="730">reader completed</text>
+  <text class="small" x="484" y="747">(slow-consumer disconnect)</text>
+  <rect class="step" x="320" y="760" width="300" height="56" rx="14"/>
+  <text class="label" x="470" y="793" text-anchor="middle">WriteStreamAsync returns</text>
+
+  <path class="flow" d="M470,816 L470,848"/>
+  <rect class="ok" x="320" y="850" width="300" height="84" rx="14"/>
+  <text class="label" x="470" y="876" text-anchor="middle">using disposes the subscription</text>
+  <text class="small" x="470" y="898" text-anchor="middle">channel completed, subscriber removed</text>
+  <text class="small" x="470" y="916" text-anchor="middle">topic removed if empty and no backlog</text>
+
+  <!-- reconnect -->
+  <path class="flow back" d="M620,892 L1150,892 L1150,130 L622,130"/>
+  <text class="small" x="886" y="122" text-anchor="middle">connection closed: EventSource reconnects with Last-Event-ID</text>
+</svg>
