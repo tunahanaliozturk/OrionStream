@@ -1,42 +1,45 @@
 # OrionStream.Redis
 
-A durable, cross-instance replay store for [OrionStream](https://github.com/tunahanaliozturk/OrionStream),
-the in-process Server-Sent Events hub for ASP.NET Core.
+A Redis-backed replay store for OrionStream, the Server-Sent Events hub for ASP.NET Core: the `Last-Event-ID` resume backlog lives in Redis instead of process memory, so a client can resume after a load balancer reconnects it to a different instance, and the backlog survives a restart.
 
-OrionStream's core resume backlog is an in-process ring: it is fast and dependency-free, but it lives
-in one process and does not survive a restart. This opt-in package plugs a Redis-backed
-`IReplayStore` into the same seam, so a client can resume by `Last-Event-ID` after a load balancer
-reconnects it to a **different** hub instance, and the backlog survives a process restart.
-
-## Scope
-
-This package stores and serves only the **resume backlog**. It does not turn the hub into a
-cross-instance publish bus: an event published on instance A is still delivered only to A's live
-subscribers. Redis is read on resume to rebuild what a reconnecting client missed, not to fan out live
-events between instances. For durable cross-process messaging, use a real broker.
+![OrionStream overview: your code publishes to the SseHub, which fans each event out to a bounded buffer per subscriber and the SSE endpoint streams it to the browser; the hub keeps the replay backlog per topic in the in-memory store or, with OrionStream.Redis, in Redis](https://raw.githubusercontent.com/tunahanaliozturk/OrionStream/main/docs/diagrams/overview.png)
 
 ## Install
 
-```bash
-dotnet add package OrionStream.Redis
-```
+    dotnet add package OrionStream.Redis
 
-## Use
+It plugs into the core `OrionStream` package (referenced for you) behind its `IReplayStore` seam, over StackExchange.Redis.
 
-Register OrionStream as usual, then swap the replay backlog onto Redis:
+## Quick start
+
+A complete `Program.cs` in an ASP.NET Core project (implicit usings on):
 
 ```csharp
+using Moongazing.OrionStream;
+using Moongazing.OrionStream.AspNetCore;
+using Moongazing.OrionStream.Redis;
+
+var builder = WebApplication.CreateBuilder(args);
+
 builder.Services.AddOrionStream(o => o.ReplayBufferCapacity = 256);
 builder.Services.AddOrionStreamRedisReplayStore("localhost:6379");
+
+var app = builder.Build();
+app.MapServerSentEvents("/events/orders", "orders");
+app.Run();
 ```
 
-The two calls can run in either order. The Redis factory replaces the default in-memory one
-definitively, so nothing else changes: the hub keeps owning event-id allocation and live delivery, and
-only the backlog moves to Redis.
+The two registration calls can run in either order: the Redis factory replaces the in-memory default rather than using `TryAdd`. The connection-string overload registers an `IConnectionMultiplexer` that connects when it is first resolved; calling it again replaces that multiplexer.
 
-To reuse an `IConnectionMultiplexer` you already register, use the no-connection-string overload:
+To reuse a multiplexer you register yourself, use the overload without a connection string:
 
 ```csharp
+using Moongazing.OrionStream;
+using Moongazing.OrionStream.Redis;
+using StackExchange.Redis;
+
+var builder = WebApplication.CreateBuilder(args);
+
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect("localhost:6379"));
 builder.Services.AddOrionStream();
 builder.Services.AddOrionStreamRedisReplayStore(o =>
@@ -46,32 +49,35 @@ builder.Services.AddOrionStreamRedisReplayStore(o =>
 });
 ```
 
-## How it works
-
-- One Redis list per topic, keyed `{KeyPrefix}{topic}`, holds backlog entries oldest first. Each
-  element carries a Redis-wide order prefix and the JSON-encoded entry.
-- Each append runs a single Lua script (one `EVAL`) that increments a per-topic Redis-wide counter
-  (`{key}:seq`), `RPUSH`es the new element, `LTRIM`s to the newest `capacity` entries, and refreshes
-  the optional TTL, all atomically. The cap matches the `ReplayBufferCapacity`
-  drop-oldest-beyond-capacity bound of the in-memory store, and no concurrent reader can observe an
-  over-capacity or half-trimmed backlog.
-- Entries are ordered by the **Redis-wide** counter, not the hub's per-instance sequence: two instances
-  publishing to the same topic each start their own sequence at 1, so a single total order over the
-  shared backlog must come from Redis. Resume matches the returning `Last-Event-ID` against the exact
-  wire id each entry emitted, resolves a duplicate id to the oldest matching entry, and replays the
-  ascending suffix after it in Redis-wide order: the same duplicate contract the in-memory store
-  documents, made correct across instances.
-- An optional sliding TTL lets a topic that has gone quiet be reclaimed by Redis on its own while an
-  active topic never expires.
-
 ## Options
 
-| Option | Default | Purpose |
-| --- | --- | --- |
-| `KeyPrefix` | `orionstream:replay:` | Namespaces per-topic backlog keys. Give independent hubs sharing one Redis distinct prefixes. |
-| `Database` | `-1` | Redis logical database index, or `-1` for the multiplexer default. |
-| `BacklogTimeToLive` | `null` | Optional sliding expiry refreshed on every append; null retains the backlog with no expiry. |
+| `RedisReplayStoreOptions` | Default | Purpose |
+|---------------------------|---------|---------|
+| `KeyPrefix` | `orionstream:replay:` | Per-topic list key is `{KeyPrefix}{topic}`. Give independent hubs sharing one Redis distinct prefixes. |
+| `Database` | `-1` | Redis logical database, or `-1` for the multiplexer default. |
+| `BacklogTimeToLive` | none | Sliding expiry refreshed on every append; none keeps the backlog with no expiry. |
 
-## License
+The backlog length per topic is the hub's `ReplayBufferCapacity` (or its per-topic override).
 
-MIT.
+## How it works
+
+- One Redis list per topic holds the newest `ReplayBufferCapacity` entries, oldest first.
+- Each append is one Lua script (`EVAL`): `INCR` a per-topic counter (`{key}:seq`), `RPUSH` the entry prefixed with that counter, `LTRIM` to capacity and refresh the optional TTL. The script runs as one unit on the Redis server, so a reader never sees an over-capacity or half-trimmed list.
+- Resume reads the list, matches `Last-Event-ID` against the exact wire id each entry emitted (the oldest entry wins when an id repeats) and returns the entries after it in list order.
+
+## Limits
+
+- Scope is the resume backlog only. An event published on instance A still reaches only A's live subscribers; this is not a cross-instance publish bus.
+- Hub-assigned wire ids (1, 2, 3, ...) are numbered per process: they restart at 1 after a restart, and two instances number the same topic independently. When more than one instance publishes to a topic, or the backlog must survive a restart, set a unique `ServerSentEvent.Id` on every event; otherwise two retained entries can share a wire id and resume can start from the wrong one.
+- The hub sorts a replayed backlog by its own per-instance sequence before delivering it, so when several instances publish to one topic the replay order follows each instance's numbering, not the Redis list order.
+- Every `Publish` on a replay-enabled topic makes a synchronous Redis call under the topic lock, and `Subscribe` with a `Last-Event-ID` reads the list. A Redis error is thrown from `Publish` (before any subscriber receives the event) or from `Subscribe`.
+
+## Related packages
+
+- `OrionStream` - the core hub, formatter, writer and endpoint helper.
+
+## Links
+
+- Documentation and full README: https://github.com/tunahanaliozturk/OrionStream
+- Changelog: https://github.com/tunahanaliozturk/OrionStream/blob/main/CHANGELOG.md
+- License: MIT

@@ -1,12 +1,12 @@
 # OrionStream Roadmap
 
-OrionStream is at **0.6.0**: an in-process Server-Sent Events hub for ASP.NET Core, with topic
+OrionStream is at **0.7.0**: an in-process Server-Sent Events hub for ASP.NET Core, with topic
 fan-out, `Last-Event-ID` resume from a bounded per-topic replay buffer behind a pluggable
 `IReplayStore` seam, a documented event-id allocation contract, an allocation-light wire writer, a
 one-line endpoint mapping helper, typed and async-enumerable publish/consume sugar, per-topic metric
-tags plus a publish/subscribe `ActivitySource`, and a configurable delivery and back-pressure surface
+tags plus a publish/subscribe `ActivitySource`, a configurable delivery and back-pressure surface
 (full-buffer policy, slow-consumer disconnect, per-topic capacity overrides, and per-subscriber
-filtering).
+filtering), and an opt-in Redis replay store (`OrionStream.Redis`).
 
 This is a list of ideas under consideration, not a schedule and not a set of promises. Items here
 may ship, change shape, or be dropped. The goal is to be honest about what the library does today
@@ -56,12 +56,13 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
   SSE endpoint to the hub in one line: it reads `Last-Event-ID`, subscribes (resuming when present),
   and streams the subscription with the correct headers, heartbeats, and disconnect cancellation.
   Overloads take a fixed topic or a per-request topic selector.
-- **Typed publish (0.3.0).** `ISseHub.Publish<T>` serializes a payload to the `data:` field with
-  `System.Text.Json` (web defaults or a supplied `JsonSerializerOptions`), alongside the unchanged
+- **Typed publish (0.3.0).** The `Publish<T>` extension on `ISseHub` (`SseHubTypedExtensions`)
+  serializes a payload to the `data:` field with `System.Text.Json` (the hub's
+  `StreamOptions.SerializerOptions` or a supplied `JsonSerializerOptions`), alongside the unchanged
   raw string publish.
 - **Async-enumerable sugar (0.3.0).** `StreamSubscription.ReadAllAsync()` / `ReadAllAsync<T>()` expose
-  a subscription as `IAsyncEnumerable<T>` for `await foreach`, and `ISseHub.PublishAllAsync<T>` drains
-  an async stream into a topic.
+  a subscription as `IAsyncEnumerable<T>` for `await foreach`, and the `PublishAllAsync<T>` extension
+  on `ISseHub` drains an async stream into a topic.
 - **Per-topic metric tags and a tracing `ActivitySource` (0.3.0).** `orionstream.published` and
   `orionstream.dropped` carried an `orionstream.topic` tag, and `StreamDiagnostics` exposes an
   `ActivitySource` named `Moongazing.OrionStream` with `OrionStream.Publish` and
@@ -94,16 +95,24 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
   implementation and a caller can swap in an external store without the hub knowing where the backlog
   lives. `InMemoryReplayStore` stays the default and the only one with no dependencies; resume reads
   through the seam, and behavior is identical with the default store.
-- **Durable Redis backplane replay store (0.6.0).** The opt-in `OrionStream.Redis` package plugs a
+- **Durable Redis replay store (0.6.0).** The opt-in `OrionStream.Redis` package plugs a
   Redis-backed `IReplayStore` into that seam, over `StackExchange.Redis`. With it registered, a client
   can resume by `Last-Event-ID` after a load balancer reconnects it to a *different* hub instance, and
   the backlog survives a process restart, because the backlog lives in Redis instead of an in-process
   ring. It is scoped strictly to the resume backlog: an event published on instance A is still
   delivered only to A's live subscribers (it is not a cross-instance publish bus). One capped Redis list
-  per topic holds entries ordered by the hub's gap-free sequence, bounded to `ReplayBufferCapacity` by
-  drop-oldest, honoring the same ordering and duplicate-WireId contract the in-memory store documents.
-  The core stays in-process fan-out with no mandatory dependency; the package is additive and the
-  in-memory ring remains the default.
+  per topic holds entries in the order of a per-topic Redis counter, bounded to `ReplayBufferCapacity`
+  by drop-oldest, honoring the duplicate-WireId contract the in-memory store documents. Hub sequences
+  stay per process, so producers that publish one topic from several instances, or need the backlog
+  across a restart, should set unique `ServerSentEvent.Id` values. The core stays in-process fan-out
+  with no mandatory dependency; the package is additive and the in-memory ring remains the default.
+- **Trim / NativeAOT annotations (0.6.1).** The reflection-based typed JSON helpers are annotated
+  `[RequiresUnreferencedCode]` / `[RequiresDynamicCode]`, and a NativeAOT publish smoke test in CI
+  covers the raw subscribe, publish and read path.
+- **Telemetry on the `Orion.Abstractions` 1.0 spine (0.7.0).** `StreamDiagnostics` derives from
+  `OrionInstrumentation`; metrics are named `orion.stream.*` with the `orion.stream.topic` tag, static
+  tags are stamped on every measurement, and meter and activity-source versions track the package
+  version.
 
 ---
 
@@ -112,10 +121,10 @@ These have landed and are reflected in [FEATURES.md](FEATURES.md) and the
 These are possibilities, ordered loosely by how aligned they are with the library's purpose. None is
 committed, and the version tags are targets.
 
-### Resume and multi-instance (Redis backplane shipped, ~Q1 2027)
+### Resume and multi-instance (Redis store shipped, ~Q1 2027)
 
 The event-id allocation contract and the pluggable `IReplayStore` seam shipped in 0.5.0, and the
-durable Redis backplane store that plugs into that seam shipped in 0.6.0 as the `OrionStream.Redis`
+durable Redis store that plugs into that seam shipped in 0.6.0 as the `OrionStream.Redis`
 package (see *Recently shipped*). A client can now resume by `Last-Event-ID` across instances and
 across a restart when that package is registered.
 
@@ -126,10 +135,10 @@ across a restart when that package is registered.
   the durable-resume need for most users.
 - **Cross-instance live fan-out (open question, not committed).** Whether to deliver an event published
   on instance A to instance B's live subscribers at all, now that a shared store abstraction exists.
-  This is a deliberate non-goal today (see below); the store backplane is scoped to resume backlog
+  This is a deliberate non-goal today (see below); the Redis store is scoped to resume backlog
   only. Listed here only to record the question, not as planned work.
 
-### Hardening (targeting 0.5.0, ~Q1 2027)
+### Hardening (not yet scheduled, ~Q1 2027)
 
 - **Configurable heartbeat and keep-alive.** The heartbeat interval is already configurable; the
   remaining work is letting a caller customize the keep-alive further (for example a different
@@ -140,7 +149,7 @@ across a restart when that package is registered.
 - **Backpressure-aware write timeouts.** A guard so a wedged client connection cannot hold a writer
   loop open indefinitely beyond cancellation.
 
-### Observability (targeting 0.5.0, ~Q1 2027)
+### Observability (not yet scheduled, ~Q1 2027)
 
 - **Resume and replay metrics.** Counters for resume attempts split by outcome (exact resume versus
   from-now fallback) and for replayed events, so operators can see how often clients reconnect with a
@@ -151,10 +160,10 @@ across a restart when that package is registered.
 ## Explicit non-goals
 
 - **Becoming a message broker.** OrionStream is in-process fan-out for SSE. For durable, cross-process
-  messaging use a real broker. A backplane replay store, if built, is scoped to `Last-Event-ID`
-  resume backlog, not to live cross-instance publishing.
+  messaging use a real broker. The Redis replay store is scoped to `Last-Event-ID` resume backlog,
+  not to live cross-instance publishing.
 - **Guaranteed delivery.** The DropOldest model is intentional. Clients that must not miss events
-  should use `Id` plus the replay buffer (or a future durable store) rather than expecting the
+  should use `Id` plus the replay buffer (or the Redis store) rather than expecting the
   per-subscriber buffer to grow without bound.
 - **A client library.** The whole point is that a browser `EventSource` needs no client. OrionStream
   will not ship a bespoke JavaScript client.
@@ -164,6 +173,6 @@ across a restart when that package is registered.
 
 ## Shaping this list
 
-If one of these ideas matters to you, or you have a use case the current surface does not cover,
-open an issue describing the real scenario. Concrete use cases are what move an idea from this list
-into actual work.
+If one of these ideas matters to you, open a feature request that names the item and describes the
+real scenario behind it. If you have a use case the current surface does not cover, open a feature
+request for that too. Concrete use cases are what move an idea from this list into actual work.

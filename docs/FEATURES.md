@@ -1,6 +1,6 @@
 # OrionStream Features
 
-A reference for everything in the current public surface (0.5.0). Every item here maps to a type or
+A reference for everything in the current public surface (0.7.0). Every item here maps to a type or
 member you can call today. For ideas not yet built, see [ROADMAP.md](ROADMAP.md).
 
 ---
@@ -44,21 +44,31 @@ public interface ISseHub
 - `Subscribe(topic, lastEventId, filter)` adds an optional predicate evaluated before the event
   enters the subscriber's buffer, so the subscriber receives only matching events (see
   [section 6](#6-delivery-and-back-pressure)).
-- `Publish(topic, evt)` delivers to every current subscriber and returns how many it reached.
-  Publishing to a topic with no subscribers returns `0`.
+- `Publish(topic, evt)` delivers to every current subscriber and returns how many accepted it into
+  their buffer (filtered-out subscribers, and full buffers under `DropNewest` or a timed-out `Wait`,
+  are not counted). Publishing to a topic with no subscribers returns `0`; with replay enabled the
+  event is still sequenced and retained for resume.
 - `SubscriberCount(topic)` returns the current subscriber count for a topic.
 
 The extension `Publish<T>(topic, payload, ...)` (in `SseHubTypedExtensions`) serializes a payload to
 the `data:` field with `System.Text.Json` so a publish site does not call `JsonSerializer.Serialize`
-by hand. It accepts an optional `JsonSerializerOptions` (web defaults otherwise) and optional
+by hand. It accepts an optional `JsonSerializerOptions` (otherwise the hub's
+`StreamOptions.SerializerOptions`, web defaults by default) and optional
 `eventName`, `id`, and `retryMilliseconds`.
 
-Topics are matched ordinally (case-sensitive). A topic is created lazily on first subscribe and
-removed once its last subscriber leaves, so idle topics do not accumulate. `Subscribe` and `Publish`
+`Publish<T>` and the typed async-enumerable helpers below serialize with reflection, so they are
+annotated `[RequiresUnreferencedCode]` / `[RequiresDynamicCode]`; the raw `Publish(topic, evt)` is
+trim- and NativeAOT-clean.
+
+Topics are matched ordinally (case-sensitive). A topic is created lazily on first subscribe, or on
+first publish when replay is enabled for it, and removed once its last subscriber leaves and it holds
+no replay backlog. With replay enabled (the default), a topic that has received a publish keeps its
+backlog, and so stays tracked, for the life of the process. `Subscribe` and `Publish`
 throw on a null or empty `topic`; `Publish` throws on a null event.
 
-The hub is thread-safe: topics and their subscribers are held in concurrent dictionaries, and each
-subscriber's channel allows a single reader with multiple concurrent writers.
+The hub is thread-safe: topics and their subscribers are held in concurrent dictionaries, topic
+creation, subscriber registration and removal run under one hub-wide lock, and each publish runs under
+its topic's lock.
 
 ---
 
@@ -86,7 +96,7 @@ public sealed class StreamSubscription : IDisposable
 
 ## 3. The event model
 
-`ServerSentEvent` is an immutable record of the fields the SSE protocol defines. Only `Data` is
+`ServerSentEvent` is an immutable class (init-only properties) holding the fields the SSE protocol defines. Only `Data` is
 required; everything else is optional.
 
 ```csharp
@@ -189,7 +199,8 @@ Task<long> PublishAllAsync<T>(this ISseHub hub, string topic, IAsyncEnumerable<T
 ```
 
 `ReadAllAsync` is a thin view over `StreamSubscription.Reader`; the typed overload deserializes each
-event's `data:` from JSON. `PublishAllAsync` publishes one event per source item. Each completes when
+event's `data:` from JSON (with the passed options, or web defaults; it does not read the hub's
+`SerializerOptions`). `PublishAllAsync` publishes one event per source item. Each completes when
 the source completes or cancellation trips.
 
 ---
@@ -204,17 +215,21 @@ override, below). What happens when that buffer is full at publish time is set b
 | --- | --- | --- |
 | `DropOldest` (default) | Evict the oldest buffered event to admit the newest. | No |
 | `DropNewest` | Keep the buffered events; discard the incoming one. | No |
-| `Wait` | Wait for room up to `MaxPublishWait`, then give up on that subscriber. | Yes, up to the cap |
+| `Wait` | Wait for room up to `MaxPublishWait`, then give up on that subscriber. | Yes, up to the cap per full subscriber |
 
 - A slow subscriber under either drop policy affects only its own stream, never the producer or other
   subscribers, and the loss is recorded as `orion.stream.dropped`.
 - `Wait` is the only policy that applies back-pressure to the publisher. It requires an explicit
   `MaxPublishWait` cap (validated at registration) so a wedged reader cannot stall `Publish` forever:
-  the call returns the instant room appears, or after the cap drops the event for that subscriber and
-  proceeds. Choose it only when slowing the producer is preferable to losing events.
+  the wait for a subscriber ends the instant room appears, or after the cap drops the event for that
+  subscriber and moves on. Subscribers are waited for one after another while the topic's lock is
+  held, so one publish can take up to `MaxPublishWait` times the number of saturated subscribers, and
+  other publishes and subscribes on that topic wait behind it. Choose it only when slowing the
+  producer is preferable to losing events.
 
-This trades guaranteed per-client delivery for keeping every stream live and current. Use
-`ServerSentEvent.Id` with a server-side replay source if a client must recover missed events.
+This trades guaranteed per-client delivery for keeping every stream live and current. A client that
+reconnects recovers missed events through `Last-Event-ID` resume (section 7), within the replay
+buffer's window.
 
 **Slow-consumer disconnect.** With `StreamOptions.SlowConsumerPolicy` set, a subscriber whose buffer
 is full on `MaxConsecutiveFullPublishes` publishes in a row is disconnected (its channel completed,
@@ -241,10 +256,12 @@ path and must not throw.
 
 Every published event carries an `id:` on the wire, and resume matches a returning `Last-Event-ID`
 against it. How that id is chosen is a stated contract, documented on `ISseHub`, not an implementation
-detail, because a replay store (here, or a future durable one) has to agree on what an id means.
+detail, because a replay store (in memory or in Redis) has to agree on what an id means.
 
 - **Hub sequence.** On every `Publish` the hub assigns the topic a sequence that is strictly
-  increasing by one with no gaps, starting at `1` for the first event published to that topic. A
+  increasing by one with no gaps, starting at `1` for the first event published to that topic. The
+  sequence lives in the hub instance's memory: it restarts at `1` with the process, and two instances
+  number the same topic independently. A
   sequence is assigned to every event, whether or not the producer set its own `Id`; setting a
   producer id does not skip or perturb the sequence.
 - **Monotonicity scope is per topic.** Each topic has its own independent sequence. Sequence numbers
@@ -271,8 +288,9 @@ sequence order) before live events flow, so a reconnecting client picks up where
 the hub dropping anything on the publish side. Two caveats bound that: the resumable window is only
 what the replay buffer still holds (`ReplayBufferCapacity` events per topic), so an event evicted
 before reconnect cannot be replayed; and replayed events count against the subscriber buffer like any
-other event, so a small subscriber buffer combined with a drop policy can still shed some replayed
-backlog before the reader drains it. An id that matches no retained entry (unknown, or evicted because
+other event, so a small subscriber buffer can still shed some replayed backlog before the reader
+drains it (`DropOldest` loses the oldest replayed entries; `DropNewest` and `Wait` refuse the newest,
+and resume never waits). Replay-time losses are not counted in `orion.stream.dropped`. An id that matches no retained entry (unknown, or evicted because
 it is older than the buffer still holds) falls back to a from-now stream with no replay. Resume is
 all-or-nothing on the lookup: a client either resumes from an exact match or starts clean, never on a
 partial or gapped lookup result. A per-subscriber filter applies to replayed backlog too. If a
@@ -318,10 +336,17 @@ assigns sequences under, so a store sees a gap-free, strictly increasing sequenc
 never has a publish race a `GetReplay`. Because of that the in-memory implementation needs no internal
 locking. The default is `InMemoryReplayStore` (handed out by `InMemoryReplayStoreFactory`); it is the
 only implementation with no dependencies and stays the default. A topic with `ReplayBufferCapacity`
-of `0` gets no store at all, keeping the wire path light. A durable, cross-instance replay store
-(Redis- or Postgres-backed, surviving a process restart and a different instance behind a load
-balancer) is **still planned** and will ship as a separate opt-in package behind this same seam; it
-is out of the core, which stays in-process fan-out with no mandatory dependency.
+of `0` gets no store at all, keeping the wire path light. That lock is per process: a store shared
+by several instances (such as Redis) sees appends from each instance's own sequence.
+
+The opt-in **`OrionStream.Redis`** package (since 0.6.0) ships a Redis-backed store behind this seam,
+registered with `AddOrionStreamRedisReplayStore(...)`, so a client can resume after reconnecting to a
+different instance and the backlog survives a restart. It holds the resume backlog only; live events
+still reach only the publishing instance's subscribers. Because hub sequences are per process, give
+every event a unique producer `Id` when several instances publish to one topic or the backlog must
+survive a restart. The hub re-sorts a replayed backlog by each entry's `Sequence`, which for entries
+from different instances follows each instance's own numbering rather than the Redis list order. A
+Postgres-backed store remains on the [roadmap](ROADMAP.md).
 
 ---
 
@@ -364,8 +389,8 @@ public sealed class StreamOptions
   `1` and `ReplayBufferCapacity` (if set) zero or greater.
 - `SerializerOptions` is the default serializer for the typed publish helpers (web defaults).
 
-Options are validated eagerly when you call `AddOrionStream`, so a bad value throws at registration
-rather than at first use.
+Options are validated eagerly when you call `AddOrionStream` (and again when `SseHub` is
+constructed), so a bad value throws at registration rather than at first use.
 
 ---
 
@@ -376,14 +401,15 @@ rather than at first use.
 
 | Instrument | Kind | Unit | Meaning |
 | --- | --- | --- | --- |
-| `orion.stream.published` | Counter | `{event}` | Events published, counted once per publish. Tagged with `orion.stream.topic`. |
-| `orion.stream.dropped` | Counter | `{event}` | Events dropped on a full subscriber buffer. Tagged with `orion.stream.topic`. |
-| `orion.stream.subscribers` | Observable gauge | `{subscriber}` | Currently connected subscribers across all topics. |
+| `orion.stream.published` | Counter | `{event}` | Recorded by `Publish`, once per call (including calls that reach no subscriber). Tagged with `orion.stream.topic`. |
+| `orion.stream.dropped` | Counter | `{event}` | Recorded by `Publish`, once per call with the number of subscribers whose buffer was full (`DropOldest` evictions, `DropNewest` discards, `Wait` timeouts). Not recorded for entries refused while replaying on `Subscribe`. Tagged with `orion.stream.topic`. |
+| `orion.stream.subscribers` | Observable gauge | `{subscriber}` | Currently connected subscribers across all topics: `Subscribe` adds one; disposing a subscription or a slow-consumer disconnect in `Publish` removes one. |
 
 The `orion.stream.topic` tag (`StreamDiagnostics.TopicTagName`) lets the published and dropped counters
 be sliced per topic. The `ActivitySource` carries an `OrionStream.Publish` (producer) span and an
 `OrionStream.Subscribe` (consumer) span, each tagged with the topic; the publish span also tags the
-delivered subscriber count.
+delivered subscriber count as `orionstream.delivered`. Static tags set through
+`OrionInstrumentation.SetStaticTags` are stamped on every measurement.
 
 `StreamDiagnostics` is `IDisposable`; disposing it disposes the meter and the activity source. Wire it
 into OpenTelemetry with `AddMeter(StreamDiagnostics.MeterName)` and
@@ -408,8 +434,9 @@ public static IServiceCollection AddOrionStream(
 
 Because registration uses `TryAdd`, registering your own `IReplayStoreFactory`, `ISseHub`,
 `StreamOptions`, or `StreamDiagnostics` before calling `AddOrionStream` wins. Registering a custom
-`IReplayStoreFactory` is how a caller swaps the backlog store without touching the hub; the durable
-cross-instance store, still planned, ships that way as a separate opt-in package.
+`IReplayStoreFactory` is how a caller swaps the backlog store without touching the hub.
+`AddOrionStreamRedisReplayStore` (in `OrionStream.Redis`) instead removes any registered
+`IReplayStoreFactory` and adds its own, so it works in either order relative to `AddOrionStream`.
 
 ---
 
